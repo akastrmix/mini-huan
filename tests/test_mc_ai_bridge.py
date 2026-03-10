@@ -15,6 +15,8 @@ import bridge_state
 from bridge_config import load_config
 from mc_ai_bridge import MCAIBridge
 
+COMMAND_PLANNER_PATH = r"C:\Users\Administrator\.openclaw\workspace-mc-helper\skills\mc-command-planner\scripts\plan-mc-command.py"
+
 
 class StubInvoker:
     def __init__(self, responses):
@@ -36,6 +38,81 @@ class CapturingInvoker(StubInvoker):
         return super().call_prompt(payload, prompt_path)
 
 
+class PrivilegedInvoker:
+    def __init__(self, *, router_response: dict, privileged_response: dict, reply_text: str | None = None):
+        self.calls = []
+        self.router_response = json.dumps(router_response, ensure_ascii=False)
+        self.privileged_response = json.dumps(privileged_response, ensure_ascii=False)
+        self.reply_text = reply_text
+        self.prompt_calls = 0
+
+    def call_prompt(self, payload, prompt_path):
+        self.calls.append({"kind": "prompt", "payload": payload, "prompt_path": prompt_path})
+        self.prompt_calls += 1
+        if self.prompt_calls == 1:
+            return self.router_response, {}
+        if self.reply_text is not None:
+            text = self.reply_text
+            self.reply_text = None
+            return text, {"reply": text}
+        return self.router_response, {}
+
+    def call_prompt_session(self, payload, prompt_path, *, session_id=""):
+        self.calls.append({
+            "kind": "session",
+            "payload": payload,
+            "prompt_path": prompt_path,
+            "session_id": session_id,
+        })
+        return self.privileged_response, {"reply": self.privileged_response, "sessionId": "priv-session-123"}
+
+
+class RouterErrorInvoker:
+    def __init__(self, *, reply_text: str, privileged_response: dict | None = None):
+        self.calls = []
+        self.reply_text = reply_text
+        self.privileged_response = json.dumps(privileged_response or {
+            "status": "completed",
+            "commands": [],
+            "reply": "",
+            "topic": "",
+            "reason": "",
+        }, ensure_ascii=False)
+
+    def call_prompt(self, payload, prompt_path):
+        self.calls.append({"payload": payload, "prompt_path": prompt_path})
+        prompt_text = str(prompt_path)
+        if "router_prompt.txt" in prompt_text:
+            raise RuntimeError("router exploded")
+        if "judge_prompt.txt" in prompt_text:
+            return json.dumps({
+                "should_reply": True,
+                "confidence": 0.9,
+                "reason": "direct_question_to_bot",
+                "target_player": payload["current_message"]["player"],
+                "topic": "greeting",
+            }, ensure_ascii=False), {}
+        return self.reply_text, {"reply": self.reply_text}
+
+    def call_prompt_session(self, payload, prompt_path, *, session_id=""):
+        self.calls.append({"payload": payload, "prompt_path": prompt_path, "session_id": session_id})
+        return self.privileged_response, {"reply": self.privileged_response, "sessionId": "local-fallback-session"}
+
+
+class PrivilegedStageErrorInvoker:
+    def __init__(self, router_response: dict):
+        self.calls = []
+        self.router_response = json.dumps(router_response, ensure_ascii=False)
+
+    def call_prompt(self, payload, prompt_path):
+        self.calls.append({"kind": "prompt", "payload": payload, "prompt_path": prompt_path})
+        return self.router_response, {}
+
+    def call_prompt_session(self, payload, prompt_path, *, session_id=""):
+        self.calls.append({"kind": "session", "payload": payload, "prompt_path": prompt_path, "session_id": session_id})
+        raise RuntimeError("privileged stage exploded")
+
+
 class StubDelivery:
     def __init__(self, error=None):
         self.error = error
@@ -46,6 +123,25 @@ class StubDelivery:
             raise self.error
         self.sent.append(reply)
         return {"sent": True, "stdout": "ok"}
+
+
+class PrivilegedDelivery(StubDelivery):
+    def __init__(self, error=None):
+        super().__init__(error=error)
+        self.private_sent = []
+        self.commands = []
+
+    def send_private_reply(self, player: str, reply: str):
+        if self.error is not None:
+            raise self.error
+        self.private_sent.append({"player": player, "reply": reply})
+        return {"sent": True, "stdout": "ok"}
+
+    def send_command(self, command_text: str):
+        if self.error is not None:
+            raise self.error
+        self.commands.append(command_text)
+        return {"sent": True, "stdout": "ok", "command": command_text}
 
 
 class BridgeTests(unittest.TestCase):
@@ -59,6 +155,7 @@ class BridgeTests(unittest.TestCase):
             "playerCooldownSeconds": 0,
             "allowAppreciationReplies": True,
             "sendToMinecraft": False,
+            "commandPlannerScriptPath": COMMAND_PLANNER_PATH,
         })
         return config
 
@@ -1221,6 +1318,262 @@ class BridgeTests(unittest.TestCase):
             self.assertTrue(third_payload["room_state"]["human_answer_seen"])
             self.assertEqual(third_payload["room_state"]["human_answer_candidates"][0]["text"], "yes")
 
+    def test_privileged_assist_route_executes_commands_and_records_player_session(self):
+        config = self.make_config()
+        config["auth"]["players"] = {"alice": ["assist"]}
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = self.make_state(tmpdir)
+            bridge = MCAIBridge(config=config, state=state)
+            bridge.invoker = PrivilegedInvoker(
+                router_response={
+                    "mode": "assist",
+                    "requested_mode": "assist",
+                    "denied_by_permission": False,
+                    "confidence": 0.92,
+                    "enter_or_continue": "enter",
+                    "private_requested": False,
+                    "topic": "return to spawn",
+                    "reason": "authorized assist request",
+                },
+                privileged_response={
+                    "status": "completed",
+                    "commands": ["/kill alice"],
+                    "reply": "这就送你回出生点。",
+                    "topic": "return to spawn",
+                    "reason": "self-reset assist",
+                },
+            )
+            bridge.delivery = PrivilegedDelivery()
+
+            bridge.handle_event({"type": "chat", "player": "alice", "message": "小幻 帮我回出生点", "raw": "<alice> 小幻 帮我回出生点"})
+
+            self.assertEqual(bridge.delivery.commands, ["kill alice"])
+            self.assertEqual(bridge.delivery.sent, ["这就送你回出生点。"])
+            session = state.data["playerSessions"]["alice"]
+            self.assertEqual(session["mode"], "assist")
+            self.assertEqual(session["sessionId"], "priv-session-123")
+            self.assertEqual(session["topic"], "return to spawn")
+
+    def test_privileged_route_can_reply_privately_when_requested(self):
+        config = self.make_config()
+        config["auth"]["players"] = {"alice": ["operator"]}
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = self.make_state(tmpdir)
+            bridge = MCAIBridge(config=config, state=state)
+            bridge.invoker = PrivilegedInvoker(
+                router_response={
+                    "mode": "command",
+                    "requested_mode": "command",
+                    "denied_by_permission": False,
+                    "confidence": 0.91,
+                    "enter_or_continue": "enter",
+                    "private_requested": True,
+                    "topic": "set weather",
+                    "reason": "private request",
+                },
+                privileged_response={
+                    "status": "completed",
+                    "commands": ["weather clear"],
+                    "reply": "已经切成晴天了。",
+                    "topic": "set weather",
+                    "reason": "weather command",
+                },
+            )
+            bridge.delivery = PrivilegedDelivery()
+
+            bridge.handle_event({"type": "chat", "player": "alice", "message": "小幻 悄悄帮我把天气改晴", "raw": "<alice> 小幻 悄悄帮我把天气改晴"})
+
+            self.assertEqual(bridge.delivery.commands, ["weather clear"])
+            self.assertEqual(bridge.delivery.sent, [])
+            self.assertEqual(
+                bridge.delivery.private_sent,
+                [{"player": "alice", "reply": "已经切成晴天了。"}],
+            )
+
+    def test_full_agent_route_reuses_active_player_session_id(self):
+        config = self.make_config()
+        config["auth"]["players"] = {"alice": ["owner"]}
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = self.make_state(tmpdir)
+            now = time.time()
+            state.activate_player_session(
+                "alice",
+                "full_agent",
+                session_id="session-existing",
+                topic="debug bridge",
+                private_requested=False,
+                timestamp=now - 5,
+            )
+            bridge = MCAIBridge(config=config, state=state)
+            bridge.invoker = PrivilegedInvoker(
+                router_response={
+                    "mode": "full_agent",
+                    "requested_mode": "full_agent",
+                    "denied_by_permission": False,
+                    "confidence": 0.95,
+                    "enter_or_continue": "continue",
+                    "private_requested": False,
+                    "topic": "debug bridge",
+                    "reason": "continuing active agent task",
+                },
+                privileged_response={
+                    "status": "completed",
+                    "commands": [],
+                    "reply": "我已经继续查了，桥现在没有新报错。",
+                    "topic": "debug bridge",
+                    "reason": "continued session",
+                },
+            )
+            bridge.delivery = PrivilegedDelivery()
+
+            bridge.handle_event({"type": "chat", "player": "alice", "message": "然后再看看最新日志", "raw": "<alice> 然后再看看最新日志"})
+
+            session_call = bridge.invoker.calls[1]
+            self.assertEqual(session_call["kind"], "session")
+            self.assertEqual(session_call["session_id"], "session-existing")
+            self.assertEqual(bridge.delivery.sent, ["我已经继续查了，桥现在没有新报错。"])
+
+    def test_router_permission_denial_falls_back_to_capability_refusal_reply(self):
+        config = self.make_config()
+        config["auth"]["players"] = {"alice": ["assist"]}
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = self.make_state(tmpdir)
+            bridge = MCAIBridge(config=config, state=state)
+            bridge.invoker = PrivilegedInvoker(
+                router_response={
+                    "mode": "chat",
+                    "requested_mode": "full_agent",
+                    "denied_by_permission": True,
+                    "confidence": 0.94,
+                    "enter_or_continue": "none",
+                    "private_requested": False,
+                    "topic": "computer control",
+                    "reason": "player requested full agent beyond permission",
+                },
+                privileged_response={
+                    "status": "completed",
+                    "commands": [],
+                    "reply": "unused",
+                    "topic": "",
+                    "reason": "",
+                },
+                reply_text="这个我现在不能直接帮你做。",
+            )
+            bridge.delivery = PrivilegedDelivery()
+
+            bridge.handle_event({"type": "chat", "player": "alice", "message": "小幻 你直接去电脑上帮我改文件", "raw": "<alice> 小幻 你直接去电脑上帮我改文件"})
+
+            self.assertEqual(bridge.delivery.sent, ["这个我现在不能直接帮你做。"])
+            self.assertEqual([call["kind"] for call in bridge.invoker.calls], ["prompt", "prompt"])
+
+    def test_router_error_falls_back_to_normal_chat_reply(self):
+        config = self.make_config()
+        config["auth"]["players"] = {"alice": ["owner"]}
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = self.make_state(tmpdir)
+            bridge = MCAIBridge(config=config, state=state)
+            bridge.invoker = RouterErrorInvoker(reply_text="Hi!")
+            bridge.delivery = PrivilegedDelivery()
+
+            bridge.handle_event({"type": "chat", "player": "alice", "message": "hi huan", "raw": "<alice> hi huan"})
+
+            self.assertEqual(bridge.delivery.sent, ["Hi!"])
+            self.assertEqual(len(bridge.invoker.calls), 3)
+
+    def test_router_error_falls_back_to_local_privileged_command_route(self):
+        config = self.make_config()
+        config["auth"]["players"] = {"alice": ["owner"]}
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = self.make_state(tmpdir)
+            now = time.time()
+            state.data["lastGlobalReplyTs"] = now - 8
+            state.data["lastPlayerReplyTs"] = {"alice": now - 8}
+            state.data["recentChat"] = [
+                {"speaker": "alice", "text": "hi huan", "timestamp": now - 12, "type": "player"},
+                {"speaker": "mini-huan", "text": "Hi!", "timestamp": now - 8, "type": "bot"},
+            ]
+            state.data["recentBotReplies"] = [
+                {"text": "Hi!", "timestamp": now - 8},
+            ]
+            bridge = MCAIBridge(config=config, state=state)
+            bridge.invoker = RouterErrorInvoker(
+                reply_text="unused",
+                privileged_response={
+                    "status": "completed",
+                    "commands": ["give alice diamond_block 64"],
+                    "reply": "给你了。",
+                    "topic": "diamond blocks",
+                    "reason": "owner command request",
+                },
+            )
+            bridge.delivery = PrivilegedDelivery()
+
+            bridge.handle_event({"type": "chat", "player": "alice", "message": "给我一组钻石块", "raw": "<alice> 给我一组钻石块"})
+
+            self.assertEqual(bridge.delivery.commands, ["give alice diamond_block 64"])
+            self.assertEqual(bridge.delivery.sent, ["给你了。"])
+
+    def test_privileged_command_error_falls_back_to_local_command_execution(self):
+        config = self.make_config()
+        config["auth"]["players"] = {"alice": ["owner"]}
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = self.make_state(tmpdir)
+            bridge = MCAIBridge(config=config, state=state)
+            bridge.invoker = PrivilegedStageErrorInvoker({
+                "mode": "command",
+                "requested_mode": "command",
+                "denied_by_permission": False,
+                "confidence": 0.9,
+                "enter_or_continue": "enter",
+                "private_requested": False,
+                "topic": "minecraft command-style request",
+                "reason": "router ok",
+            })
+            bridge.delivery = PrivilegedDelivery()
+
+            bridge.handle_event({"type": "chat", "player": "alice", "message": "给我一组钻石块", "raw": "<alice> 给我一组钻石块"})
+
+            self.assertEqual(bridge.delivery.commands, ["give alice diamond_block 64"])
+            self.assertEqual(bridge.delivery.sent, ["给你了。"])
+
+    def test_privileged_command_continuation_reuses_last_successful_command_context(self):
+        config = self.make_config()
+        config["auth"]["players"] = {"alice": ["owner"]}
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = self.make_state(tmpdir)
+            bridge = MCAIBridge(config=config, state=state)
+            bridge.invoker = PrivilegedStageErrorInvoker({
+                "mode": "command",
+                "requested_mode": "command",
+                "denied_by_permission": False,
+                "confidence": 0.9,
+                "enter_or_continue": "enter",
+                "private_requested": False,
+                "topic": "minecraft command-style request",
+                "reason": "router ok",
+            })
+            bridge.delivery = PrivilegedDelivery()
+
+            bridge.handle_event({"type": "chat", "player": "alice", "message": "给我一组钻石块", "raw": "<alice> 给我一组钻石块"})
+            bridge.handle_event({"type": "chat", "player": "alice", "message": "再来一组", "raw": "<alice> 再来一组"})
+
+            self.assertEqual(
+                bridge.delivery.commands,
+                ["give alice diamond_block 64", "give alice diamond_block 64"],
+            )
+            self.assertEqual(
+                bridge.delivery.sent,
+                ["给你了。", "再给你一份。"],
+            )
+
     def test_load_config_backfills_new_default_fields(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "bridge_config.json"
@@ -1237,6 +1590,9 @@ class BridgeTests(unittest.TestCase):
             self.assertEqual(config["followupReplyWindowSeconds"], 180)
             self.assertEqual(config["maxSamePlayerConversationReplies"], 20)
             self.assertEqual(config["botStyle"]["persona"], "Minecraft public-chat helper")
+            self.assertEqual(config["routerConfidenceThreshold"], 0.55)
+            self.assertEqual(config["modeSessionWindowSeconds"]["full_agent"], 900)
+            self.assertEqual(config["auth"]["groups"]["owner"]["max_mode"], "full_agent")
 
 
 if __name__ == "__main__":

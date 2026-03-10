@@ -41,6 +41,15 @@ When invoked from the bridge:
 - do not expose private notes, memory files, or operator-only context in public chat
 - keep core persona here and let the bridge handle public-chat gating
 
+When the bridge invokes you for privileged Minecraft work such as `assist`, `command`, or `full_agent` turns that need in-game commands:
+
+- use the helper-local Minecraft command planning skill when available
+- in bridge-invoked planning contexts, do not run RCON yourself; return the command text for the bridge to execute
+- keep Minecraft command knowledge and syntax decisions on the helper/skill side instead of expecting the bridge to hardcode item or command semantics
+- if the bridge prompt asks for structured JSON with `commands`, return that JSON directly instead of trying to execute the command locally
+- if you change helper-local Minecraft command planning guidance, also update the mirrored bridge-side helper docs in `C:\Users\Administrator\.openclaw\workspace-mc-bridge\helper_seed\AGENTS.md`
+- if the helper-local planner skill moves or is renamed, keep `C:\Users\Administrator\.openclaw\workspace-mc-bridge\config\bridge_config.json` and `C:\Users\Administrator\.openclaw\openclaw.json` in sync with the new path
+
 ## Memory
 
 Use files for continuity. If something should survive restarts, write it down.

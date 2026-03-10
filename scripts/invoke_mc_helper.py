@@ -87,12 +87,13 @@ def resolve_helper_workspace(config: dict):
 
 
 def main():
-    if len(sys.argv) != 7:
+    if len(sys.argv) not in {7, 8}:
         raise SystemExit(
-            "usage: invoke_mc_helper.py <agentId> <timeoutSeconds> <taskJsonFile> <configFile> <outFile> <promptPath>"
+            "usage: invoke_mc_helper.py <agentId> <timeoutSeconds> <taskJsonFile> <configFile> <outFile> <promptPath> [sessionId]"
         )
 
     agent_id, timeout_seconds, task_json_file, config_file, out_file, prompt_path = sys.argv[1:7]
+    session_id = sys.argv[7] if len(sys.argv) == 8 else ""
     task_payload = json.loads(Path(task_json_file).read_text(encoding="utf-8"))
     config = json.loads(Path(config_file).read_text(encoding="utf-8"))
     prompt_text = Path(prompt_path).read_text(encoding="utf-8")
@@ -113,6 +114,8 @@ def main():
         "--timeout",
         str(timeout_seconds_int),
     ]
+    if session_id:
+        cmd.extend(["--session-id", session_id])
 
     try:
         proc = subprocess.run(

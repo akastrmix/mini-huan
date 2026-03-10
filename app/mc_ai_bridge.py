@@ -10,10 +10,14 @@ from pathlib import Path
 
 from bridge_config import load_config
 from bridge_components import (
+    DEFAULT_ASSIST_PROMPT,
+    DEFAULT_COMMAND_PROMPT,
     DEFAULT_CONFIG_PATH,
+    DEFAULT_FULL_AGENT_PROMPT,
     DEFAULT_JUDGE_PROMPT,
     DEFAULT_MAX_MESSAGE_CHARS,
     DEFAULT_REPLY_PROMPT,
+    DEFAULT_ROUTER_PROMPT,
     DEFAULT_STATE_PATH,
     DEFAULT_AGENT,
     AgentInvoker,
@@ -22,7 +26,13 @@ from bridge_components import (
     JudgePipeline,
     Logger,
     MinecraftDelivery,
+    local_privileged_execution_fallback,
+    local_router_fallback,
+    parse_execution_response,
+    parse_router_response,
+    resolve_player_auth,
 )
+from bridge_privileged import MODE_CHAT, PRIVILEGED_MODES
 from mc_log_listener import open_log_file, parse_event
 
 try:
@@ -116,6 +126,43 @@ class MCAIBridge:
         self.append_chat_entry(str(event.get("player") or ""), str(event.get("message") or ""), "player")
         self.state.save()
 
+    def player_auth(self, event: dict):
+        return resolve_player_auth(self.config, str(event.get("player") or ""))
+
+    def active_player_session(self, event: dict):
+        return self.state.active_player_session(
+            self.config,
+            str(event.get("player") or ""),
+            now=time.time(),
+        )
+
+    def should_attempt_router(self, player_auth: dict, active_session: dict | None):
+        return bool(active_session) or str((player_auth or {}).get("max_mode") or MODE_CHAT) != MODE_CHAT
+
+    def run_router_stage(self, event: dict, player_auth: dict, active_session: dict | None):
+        router_context = self.context.build_router_context(event, player_auth, active_session)
+        if self.logger.input_logs_enabled():
+            self.logger.emit({"bridge": "router_input", "event": event, "context": router_context})
+        try:
+            router_text, _ = self.invoker.call_prompt(
+                router_context,
+                str(self.config.get("routerPromptPath", DEFAULT_ROUTER_PROMPT)),
+            )
+        except Exception as exc:
+            self.logger.emit({"bridge": "error", "stage": "router", "error": str(exc), "event": event})
+            fallback_route = local_router_fallback(router_context, player_auth, active_session)
+            self.logger.emit({"bridge": "router_local_fallback", "event": event, "route": fallback_route})
+            return fallback_route, "ok"
+
+        route = parse_router_response(
+            router_text,
+            player_auth=player_auth,
+            active_session=active_session,
+            config=self.config,
+        )
+        self.logger.emit({"bridge": "router", "event": event, "route": route})
+        return route, "ok"
+
     def run_judge_stage(self, event: dict):
         judge_context = self.context.build_judge_context(event)
         if self.logger.input_logs_enabled():
@@ -193,15 +240,47 @@ class MCAIBridge:
             return True
         return bool(parsed.get("error"))
 
-    def finalize_reply(self, event: dict, decision: dict, reply: str):
+    def fallback_text(self, event: dict, *, chinese: str, english: str):
+        message = str(event.get("message") or "")
+        if any("\u4e00" <= ch <= "\u9fff" for ch in message):
+            return chinese
+        return english
+
+    def permission_denied_decision(self, event: dict, route: dict):
+        return {
+            "should_reply": True,
+            "confidence": max(0.84, float(route.get("confidence", 0.0) or 0.0)),
+            "reason": "capability_refusal",
+            "target_player": str(event.get("player") or ""),
+            "topic": str(route.get("topic") or route.get("requested_mode") or "permission restricted"),
+        }
+
+    def prompt_path_for_mode(self, mode: str):
+        if mode == "assist":
+            return str(self.config.get("assistPromptPath", DEFAULT_ASSIST_PROMPT))
+        if mode == "command":
+            return str(self.config.get("commandPromptPath", DEFAULT_COMMAND_PROMPT))
+        return str(self.config.get("fullAgentPromptPath", DEFAULT_FULL_AGENT_PROMPT))
+
+    def finalize_outbound_reply(
+        self,
+        *,
+        event: dict,
+        reply: str,
+        log_payload: dict,
+        private_requested: bool = False,
+    ):
         try:
-            send_result = self.delivery.send_reply(reply)
+            if private_requested:
+                send_result = self.delivery.send_private_reply(str(event.get("player") or ""), reply)
+            else:
+                send_result = self.delivery.send_reply(reply)
         except Exception as exc:
             self.logger.emit({"bridge": "error", "stage": "delivery", "error": str(exc), "event": event, "reply": reply})
             return False
         now = time.time()
         self.state.record_delivery(
-            player=event["player"],
+            player=str(event.get("player") or ""),
             reply=reply,
             display_name=str(self.config.get("displayName", "mini-huan")),
             timestamp=now,
@@ -210,15 +289,153 @@ class MCAIBridge:
             player_history_limit=int(self.config.get("playerHistoryStateSize", 12)),
         )
         self.state.save()
+        self.logger.emit({**dict(log_payload or {}), "delivery": send_result, "private": private_requested})
+        return True
+
+    def finalize_reply(self, event: dict, decision: dict, reply: str):
         self.logger.emit({
-            "bridge": "reply",
+            "bridge": "reply_prepare",
             "event": event,
             "decision": decision,
             "reply": reply,
             "sessionId": self.state.session_id(),
-            "delivery": send_result,
         })
+        success = self.finalize_outbound_reply(
+            event=event,
+            reply=reply,
+            log_payload={
+                "bridge": "reply",
+                "event": event,
+                "decision": decision,
+                "reply": reply,
+                "sessionId": self.state.session_id(),
+            },
+        )
+        if not success:
+            return False
         self.emit_summary(event, "reply", decision, "sent")
+        return True
+
+    def handle_permission_denied(self, event: dict, route: dict):
+        decision = self.permission_denied_decision(event, route)
+        reply, _raw, reply_status = self.run_reply_stage(event, decision)
+        if reply_status != "ok":
+            return False
+        return self.finalize_reply(event, decision, reply)
+
+    def run_privileged_stage(self, event: dict, player_auth: dict, route: dict, active_session: dict | None):
+        mode = str(route.get("mode") or "")
+        privileged_context = self.context.build_privileged_context(event, player_auth, route, active_session)
+        if self.logger.input_logs_enabled():
+            self.logger.emit({"bridge": f"{mode}_input", "event": event, "context": privileged_context})
+
+        session_id = ""
+        if active_session and str(active_session.get("mode") or "") == mode:
+            session_id = str(active_session.get("session_id") or "")
+
+        try:
+            raw_text, raw_result = self.invoker.call_prompt_session(
+                privileged_context,
+                self.prompt_path_for_mode(mode),
+                session_id=session_id,
+            )
+        except Exception as exc:
+            self.logger.emit({"bridge": "error", "stage": mode, "error": str(exc), "event": event})
+            return None, None, "privileged_error"
+
+        execution = parse_execution_response(raw_text, mode=mode)
+        if self.reply_looks_like_agent_error(execution.get("reply") or ""):
+            self.logger.emit({"bridge": "error", "stage": f"{mode}_payload", "error": execution.get("reply"), "event": event})
+            return None, raw_result, "privileged_error"
+        self.logger.emit({"bridge": mode, "event": event, "route": route, "result": execution})
+        return execution, raw_result, "ok"
+
+    def finalize_privileged_result(self, event: dict, route: dict, execution: dict, raw_result: dict | None, active_session: dict | None):
+        commands = list(execution.get("commands") or [])
+        for command in commands:
+            try:
+                self.delivery.send_command(command)
+            except Exception as exc:
+                self.logger.emit({
+                    "bridge": "error",
+                    "stage": "command_delivery",
+                    "error": str(exc),
+                    "event": event,
+                    "route": route,
+                    "command": command,
+                })
+                return False
+
+        session_topic = str(execution.get("topic") or route.get("topic") or "")
+        reply = str(execution.get("reply") or "").strip()
+        if not reply:
+            if execution.get("status") == "completed" and commands:
+                reply = self.fallback_text(
+                    event,
+                    chinese="好了。",
+                    english="Done.",
+                )
+            elif execution.get("status") == "needs_clarification":
+                reply = self.fallback_text(
+                    event,
+                    chinese="你再具体说一点，我再帮你做。",
+                    english="Give me a bit more detail and I can do that.",
+                )
+            elif execution.get("status") == "denied":
+                reply = self.fallback_text(
+                    event,
+                    chinese="这个我不方便直接帮你做。",
+                    english="I should not do that directly.",
+                )
+            else:
+                reply = self.fallback_text(
+                    event,
+                    chinese="这次没执行好，你再说一遍。",
+                    english="That did not go through cleanly, try again.",
+                )
+
+        should_keep_session = execution.get("status") in {"completed", "denied", "needs_clarification"}
+        if should_keep_session:
+            self.state.activate_player_session(
+                str(event.get("player") or ""),
+                str(route.get("mode") or ""),
+                session_id=str((raw_result or {}).get("sessionId") or (active_session or {}).get("session_id") or ""),
+                topic=session_topic,
+                private_requested=bool(route.get("private_requested", False) or ((active_session or {}).get("private_requested") and route.get("enter_or_continue") == "continue")),
+                last_request_text=str(event.get("message") or ""),
+                last_commands=commands,
+                last_reply_text=reply,
+                timestamp=time.time(),
+            )
+            self.state.save()
+
+        private_requested = bool(route.get("private_requested", False) or ((active_session or {}).get("private_requested") and route.get("enter_or_continue") == "continue"))
+        success = self.finalize_outbound_reply(
+            event=event,
+            reply=reply,
+            private_requested=private_requested,
+            log_payload={
+                "bridge": "privileged_reply",
+                "event": event,
+                "route": route,
+                "result": execution,
+                "reply": reply,
+                "sessionId": str((raw_result or {}).get("sessionId") or (active_session or {}).get("session_id") or ""),
+            },
+        )
+        if not success:
+            return False
+        self.emit_summary(
+            event,
+            str(route.get("mode") or "privileged"),
+            {
+                "should_reply": True,
+                "confidence": route.get("confidence", 1.0),
+                "reason": str(execution.get("status") or route.get("reason") or ""),
+                "topic": str(execution.get("topic") or route.get("topic") or ""),
+            },
+            "sent",
+        )
         return True
 
     def handle_event(self, event: dict):
@@ -230,6 +447,39 @@ class MCAIBridge:
             return
 
         self.record_player_turn(event)
+        player_auth = self.player_auth(event)
+        active_session = self.active_player_session(event)
+
+        if self.should_attempt_router(player_auth, active_session):
+            route, router_status = self.run_router_stage(event, player_auth, active_session)
+            if router_status != "ok" or route is None:
+                self.logger.emit({"bridge": "router_fallback_to_chat", "event": event, "player_auth": player_auth})
+            else:
+                if route.get("enter_or_continue") == "exit":
+                    self.state.clear_player_session(str(event.get("player") or ""))
+                    self.state.save()
+                    active_session = None
+                if route.get("denied_by_permission"):
+                    if not self.handle_permission_denied(event, route):
+                        self.mark_turn_without_reply()
+                    return
+                if str(route.get("mode") or "") in PRIVILEGED_MODES:
+                    execution, raw_result, privileged_status = self.run_privileged_stage(event, player_auth, route, active_session)
+                    if privileged_status != "ok" or execution is None:
+                        local_execution = None
+                        if str(route.get("mode") or "") in {"assist", "command"}:
+                            local_execution = local_privileged_execution_fallback(event, route, player_auth, self.config, active_session)
+                        if local_execution is not None:
+                            self.logger.emit({"bridge": "privileged_local_execution_fallback", "event": event, "route": route, "result": local_execution})
+                            if not self.finalize_privileged_result(event, route, local_execution, {}, active_session):
+                                self.mark_turn_without_reply()
+                            return
+                        self.logger.emit({"bridge": "privileged_fallback_to_chat", "event": event, "route": route})
+                    else:
+                        if not self.finalize_privileged_result(event, route, execution, raw_result, active_session):
+                            self.mark_turn_without_reply()
+                        return
+
         decision, _judge_context, judge_status = self.run_judge_stage(event)
         if judge_status != "passed":
             self.mark_turn_without_reply()

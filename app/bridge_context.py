@@ -70,6 +70,14 @@ class ContextBuilder:
             aliases.append(alias)
         return aliases
 
+    def bot_profile(self):
+        return {
+            "name": str(self.config.get("displayName", "mini-huan")),
+            "name_zh": str(self.config.get("displayNameZh", "\u5c0f\u5e7b")),
+            "name_aliases": self.configured_name_aliases(),
+            "persona": ((self.config.get("botStyle") or {}).get("persona") or "Minecraft public-chat helper"),
+        }
+
     def content_tokens(self, text: str, *, current_player: str = ""):
         tokens = set(self.tokenize_text(text))
         stop_tokens = set(EN_CONTENT_STOPWORDS)
@@ -359,12 +367,7 @@ class ContextBuilder:
         last_global = float(self.state.data.get("lastGlobalReplyTs", 0.0))
         human_answers = self.human_answer_candidates(player, message)
         return {
-            "bot_profile": {
-                "name": str(self.config.get("displayName", "mini-huan")),
-                "name_zh": str(self.config.get("displayNameZh", "\u5c0f\u5e7b")),
-                "name_aliases": self.configured_name_aliases(),
-                "persona": ((self.config.get("botStyle") or {}).get("persona") or "Minecraft public-chat helper"),
-            },
+            "bot_profile": self.bot_profile(),
             "current_message": {
                 "player": player,
                 "text": message,
@@ -386,10 +389,7 @@ class ContextBuilder:
         message = str(event.get("message") or "")
         return {
             "bot_profile": {
-                "name": str(self.config.get("displayName", "mini-huan")),
-                "name_zh": str(self.config.get("displayNameZh", "\u5c0f\u5e7b")),
-                "name_aliases": self.configured_name_aliases(),
-                "persona": ((self.config.get("botStyle") or {}).get("persona") or "Minecraft public-chat helper"),
+                **self.bot_profile(),
                 "style": self.config.get("botStyle") or {},
             },
             "decision": decision,
@@ -408,6 +408,76 @@ class ContextBuilder:
                 "replyPlayerHistoryCount",
                 int(self.config.get("judgePlayerHistoryCount", 3)),
             ),
+            "max_reply_chars": int(self.config.get("maxReplyChars", 80)),
+            "language_hint": self.config.get("languageHint") or "",
+        }
+
+    def build_router_context(self, event: dict, player_auth: dict, active_session: dict | None):
+        player = str(event.get("player") or "")
+        message = str(event.get("message") or "")
+        now = time.time()
+        session_payload = None
+        if active_session:
+            session_payload = {
+                "mode": str(active_session.get("mode") or ""),
+                "topic": str(active_session.get("topic") or ""),
+                "seconds_since_active": max(0, int(now - float(active_session.get("last_active_ts") or now))),
+                "private_requested": bool(active_session.get("private_requested", False)),
+                "last_request_text": str(active_session.get("last_request_text") or ""),
+                "last_commands": list(active_session.get("last_commands") or []),
+                "last_reply_text": str(active_session.get("last_reply_text") or ""),
+            }
+        return {
+            "bot_profile": self.bot_profile(),
+            "player_auth": dict(player_auth or {}),
+            "current_message": {
+                "player": player,
+                "text": message,
+                "timestamp": int(now),
+            },
+            "active_session": session_payload,
+            "recent_chat": self.select_recent_chat("judgeRecentChatCount", 10, player, message),
+            "recent_bot_messages": self.recent_bot_messages("judgeRecentBotCount", 2),
+            "player_recent_messages": self.player_history(player, "judgePlayerHistoryCount", 3),
+        }
+
+    def build_privileged_context(
+        self,
+        event: dict,
+        player_auth: dict,
+        route: dict,
+        active_session: dict | None,
+    ):
+        player = str(event.get("player") or "")
+        message = str(event.get("message") or "")
+        now = time.time()
+        session_payload = None
+        if active_session:
+            session_payload = {
+                "mode": str(active_session.get("mode") or ""),
+                "topic": str(active_session.get("topic") or ""),
+                "seconds_since_active": max(0, int(now - float(active_session.get("last_active_ts") or now))),
+                "private_requested": bool(active_session.get("private_requested", False)),
+                "last_request_text": str(active_session.get("last_request_text") or ""),
+                "last_commands": list(active_session.get("last_commands") or []),
+                "last_reply_text": str(active_session.get("last_reply_text") or ""),
+            }
+        return {
+            "bot_profile": {
+                **self.bot_profile(),
+                "style": self.config.get("botStyle") or {},
+            },
+            "player_auth": dict(player_auth or {}),
+            "route": dict(route or {}),
+            "current_message": {
+                "player": player,
+                "text": message,
+                "timestamp": int(now),
+            },
+            "active_session": session_payload,
+            "recent_chat": self.select_recent_chat("replyRecentChatCount", 12, player, message),
+            "recent_bot_messages": self.recent_bot_messages("replyRecentBotCount", 3),
+            "player_recent_messages": self.player_history(player, "replyPlayerHistoryCount", 5),
             "max_reply_chars": int(self.config.get("maxReplyChars", 80)),
             "language_hint": self.config.get("languageHint") or "",
         }

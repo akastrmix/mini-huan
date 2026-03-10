@@ -5,6 +5,11 @@
   "rconScriptPath": "C:\\Users\\Administrator\\.openclaw\\workspace\\skills\\mc-rcon-exec\\scripts\\send-rcon.ps1",
   "promptPath": "C:\\Users\\Administrator\\.openclaw\\workspace-mc-bridge\\config\\reply_prompt.txt",
   "judgePromptPath": "C:\\Users\\Administrator\\.openclaw\\workspace-mc-bridge\\config\\judge_prompt.txt",
+  "routerPromptPath": "C:\\Users\\Administrator\\.openclaw\\workspace-mc-bridge\\config\\router_prompt.txt",
+  "assistPromptPath": "C:\\Users\\Administrator\\.openclaw\\workspace-mc-bridge\\config\\assist_prompt.txt",
+  "commandPromptPath": "C:\\Users\\Administrator\\.openclaw\\workspace-mc-bridge\\config\\command_prompt.txt",
+  "commandPlannerScriptPath": "C:\\Users\\Administrator\\.openclaw\\workspace-mc-helper\\skills\\mc-command-planner\\scripts\\plan-mc-command.py",
+  "fullAgentPromptPath": "C:\\Users\\Administrator\\.openclaw\\workspace-mc-bridge\\config\\full_agent_prompt.txt",
   "helperWorkspacePath": "C:\\Users\\Administrator\\.openclaw\\workspace-mc-helper",
   "sendToMinecraft": true,
   "replyMode": "tellraw_all",
@@ -23,6 +28,33 @@
   "agentTimeoutSeconds": 90,
   "rconTimeoutSeconds": 15,
   "languageHint": "reply in Chinese when the player speaks Chinese, otherwise match the player's language",
+  "routerConfidenceThreshold": 0.55,
+  "modeSessionWindowSeconds": {
+    "assist": 180,
+    "command": 300,
+    "full_agent": 900
+  },
+  "auth": {
+    "groups": {
+      "default": {
+        "max_mode": "assist"
+      },
+      "assist": {
+        "max_mode": "assist"
+      },
+      "operator": {
+        "max_mode": "command"
+      },
+      "owner": {
+        "max_mode": "full_agent"
+      }
+    },
+    "players": {
+      "akastrmix": [
+        "owner"
+      ]
+    }
+  },
   "recentEventCacheSize": 200,
   "judgeRecentChatCount": 20,
   "judgePlayerHistoryCount": 6,

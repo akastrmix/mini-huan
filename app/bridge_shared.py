@@ -20,6 +20,40 @@ DEFAULT_RCON_SCRIPT = r"C:\Users\Administrator\.openclaw\workspace\skills\mc-rco
 DEFAULT_PYTHON = r"C:\Users\Administrator\AppData\Local\Programs\Python\Python312\python.exe"
 DEFAULT_JUDGE_PROMPT = str(BASE_DIR / "config" / "judge_prompt.txt")
 DEFAULT_REPLY_PROMPT = str(BASE_DIR / "config" / "reply_prompt.txt")
+DEFAULT_ROUTER_PROMPT = str(BASE_DIR / "config" / "router_prompt.txt")
+DEFAULT_ASSIST_PROMPT = str(BASE_DIR / "config" / "assist_prompt.txt")
+DEFAULT_COMMAND_PROMPT = str(BASE_DIR / "config" / "command_prompt.txt")
+DEFAULT_FULL_AGENT_PROMPT = str(BASE_DIR / "config" / "full_agent_prompt.txt")
+DEFAULT_ROUTER_CONFIDENCE_THRESHOLD = 0.55
+MODE_CHAT = "chat"
+MODE_ASSIST = "assist"
+MODE_COMMAND = "command"
+MODE_FULL_AGENT = "full_agent"
+MODE_ORDER = {
+    MODE_CHAT: 0,
+    MODE_ASSIST: 1,
+    MODE_COMMAND: 2,
+    MODE_FULL_AGENT: 3,
+}
+PRIVILEGED_MODES = {
+    MODE_ASSIST,
+    MODE_COMMAND,
+    MODE_FULL_AGENT,
+}
+DEFAULT_MODE_SESSION_WINDOWS = {
+    MODE_ASSIST: 180,
+    MODE_COMMAND: 300,
+    MODE_FULL_AGENT: 900,
+}
+DEFAULT_AUTH = {
+    "groups": {
+        "default": {"max_mode": MODE_CHAT},
+        "assist": {"max_mode": MODE_ASSIST},
+        "operator": {"max_mode": MODE_COMMAND},
+        "owner": {"max_mode": MODE_FULL_AGENT},
+    },
+    "players": {},
+}
 
 WORD_RE = re.compile(r"\w+", re.UNICODE)
 CJK_RE = re.compile(r"[\u4e00-\u9fff]+")
@@ -142,6 +176,11 @@ DIRECT_REQUEST_HINTS_ZH = {
     "\u80fd\u4e0d\u80fd",
     "\u53ef\u4e0d\u53ef\u4ee5",
     "\u5e2e\u6211",
+    "\u7ed9\u6211",
+    "\u6765\u4e00\u4e2a",
+    "\u6765\u4e00\u7ec4",
+    "\u7ed9\u6211\u4e00\u4e2a",
+    "\u7ed9\u6211\u4e00\u7ec4",
     "\u544a\u8bc9\u6211",
     "\u518d\u8bf4\u4e00\u904d",
     "\u91cd\u590d",

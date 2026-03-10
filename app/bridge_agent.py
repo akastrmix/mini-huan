@@ -24,6 +24,12 @@ class AgentInvoker:
         self.state = state
 
     def call_prompt(self, payload: dict, prompt_path: str):
+        return self._call_prompt(payload, prompt_path)
+
+    def call_prompt_session(self, payload: dict, prompt_path: str, *, session_id: str = ""):
+        return self._call_prompt(payload, prompt_path, session_id=session_id)
+
+    def _call_prompt(self, payload: dict, prompt_path: str, *, session_id: str = ""):
         helper_script = self.config.get("helperScriptPath", DEFAULT_HELPER_SCRIPT)
         python_exe = self.config.get("pythonPath", DEFAULT_PYTHON)
         config_path = self.config.get("configPath", str(DEFAULT_CONFIG_PATH))
@@ -52,6 +58,8 @@ class AgentInvoker:
                 out_json_path,
                 prompt_path,
             ]
+            if session_id:
+                command.append(str(session_id))
             try:
                 proc = subprocess.run(
                     command,
@@ -68,8 +76,6 @@ class AgentInvoker:
                 stdout = (proc.stdout or "").encode("ascii", "backslashreplace").decode("ascii")
                 raise RuntimeError(stderr.strip() or stdout.strip() or f"mc-helper invoke failed: {proc.returncode}")
             result = json.loads(Path(out_json_path).read_text(encoding="utf-8").strip())
-            new_session_id = result.get("sessionId")
-            self.state.set_session_id(new_session_id or "")
             return (result.get("reply") or "").strip(), result
         finally:
             for path in (task_json_path, out_json_path):

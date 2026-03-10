@@ -7,7 +7,8 @@ import tempfile
 import time
 from pathlib import Path
 
-from bridge_shared import DEFAULT_BOT_REPLY_STREAK_RESET
+from bridge_shared import DEFAULT_BOT_REPLY_STREAK_RESET, PRIVILEGED_MODES
+from bridge_privileged import normalize_mode, session_window_seconds
 
 
 class BridgeState:
@@ -17,6 +18,7 @@ class BridgeState:
             "sessionId": None,
             "lastGlobalReplyTs": 0.0,
             "lastPlayerReplyTs": {},
+            "playerSessions": {},
             "recentEventKeys": [],
             "recentChat": [],
             "recentBotReplies": [],
@@ -35,6 +37,7 @@ class BridgeState:
         self.data.setdefault("recentChat", [])
         self.data.setdefault("recentBotReplies", [])
         self.data.setdefault("playerMessageHistory", {})
+        self.data.setdefault("playerSessions", {})
         self.data.setdefault("botConsecutiveReplyCount", 0)
 
     def save(self):
@@ -67,6 +70,104 @@ class BridgeState:
     def set_session_id(self, session_id: str):
         if session_id:
             self.data["sessionId"] = session_id
+
+    def player_session(self, player: str):
+        sessions = self.data.setdefault("playerSessions", {})
+        key = str(player or "").strip()
+        if not key:
+            return {}
+        session = dict(sessions.get(key) or {})
+        session.setdefault("mode", "")
+        session.setdefault("sessionId", "")
+        session.setdefault("topic", "")
+        session.setdefault("lastActiveTs", 0.0)
+        session.setdefault("privateRequested", False)
+        session.setdefault("lastRequestText", "")
+        session.setdefault("lastCommands", [])
+        session.setdefault("lastReplyText", "")
+        sessions[key] = session
+        return session
+
+    def clear_player_session(self, player: str):
+        key = str(player or "").strip()
+        if not key:
+            return
+        sessions = self.data.setdefault("playerSessions", {})
+        if key in sessions:
+            sessions[key] = {
+                "mode": "",
+                "sessionId": "",
+                "topic": "",
+                "lastActiveTs": 0.0,
+                "privateRequested": False,
+                "lastRequestText": "",
+                "lastCommands": [],
+                "lastReplyText": "",
+            }
+
+    def active_player_session(self, config: dict, player: str, *, now: float | None = None):
+        key = str(player or "").strip()
+        if not key:
+            return None
+        session = dict(self.player_session(key))
+        mode = normalize_mode(session.get("mode"))
+        if mode not in PRIVILEGED_MODES or not session.get("lastActiveTs"):
+            return None
+        if mode == "full_agent" and not session.get("sessionId"):
+            return None
+        last_active = float(session.get("lastActiveTs") or 0.0)
+        ref_now = time.time() if now is None else now
+        window = session_window_seconds(config, mode)
+        if window > 0 and (ref_now - last_active) > window:
+            self.clear_player_session(key)
+            return None
+        return {
+            "mode": mode,
+            "session_id": str(session.get("sessionId") or ""),
+            "topic": str(session.get("topic") or ""),
+            "last_active_ts": last_active,
+            "private_requested": bool(session.get("privateRequested", False)),
+            "last_request_text": str(session.get("lastRequestText") or ""),
+            "last_commands": list(session.get("lastCommands") or []),
+            "last_reply_text": str(session.get("lastReplyText") or ""),
+        }
+
+    def activate_player_session(
+        self,
+        player: str,
+        mode: str,
+        *,
+        session_id: str = "",
+        topic: str = "",
+        private_requested: bool = False,
+        last_request_text: str = "",
+        last_commands: list[str] | None = None,
+        last_reply_text: str = "",
+        timestamp: float | None = None,
+    ):
+        key = str(player or "").strip()
+        if not key:
+            return
+        session = self.player_session(key)
+        session["mode"] = normalize_mode(mode)
+        if session_id:
+            session["sessionId"] = str(session_id)
+        session["topic"] = str(topic or "")
+        session["privateRequested"] = bool(private_requested)
+        session["lastRequestText"] = str(last_request_text or "")
+        session["lastCommands"] = [str(item or "").strip() for item in list(last_commands or []) if str(item or "").strip()]
+        session["lastReplyText"] = str(last_reply_text or "")
+        session["lastActiveTs"] = float(time.time() if timestamp is None else timestamp)
+        self.data.setdefault("playerSessions", {})[key] = session
+
+    def set_player_session_id(self, player: str, mode: str, session_id: str):
+        key = str(player or "").strip()
+        if not key or not session_id:
+            return
+        session = self.player_session(key)
+        session["mode"] = normalize_mode(mode)
+        session["sessionId"] = str(session_id)
+        self.data.setdefault("playerSessions", {})[key] = session
 
     def bot_reply_streak(self, *, reset_after_seconds: float | None = None, now: float | None = None):
         streak = int(self.data.get("botConsecutiveReplyCount", 0))

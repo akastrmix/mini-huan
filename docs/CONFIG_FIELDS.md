@@ -16,6 +16,18 @@ This file explains the fields in `bridge_config.json` as the bridge works today.
   - Reply-stage prompt file
 - `judgePromptPath`
   - Judge-stage prompt file
+- `routerPromptPath`
+  - Natural-language capability routing prompt file
+- `assistPromptPath`
+  - Privileged in-game assist prompt file
+- `commandPromptPath`
+  - Privileged Minecraft command prompt file
+- `commandPlannerScriptPath`
+  - Bridge-side local fallback planner script for the helper-local Minecraft command planning skill
+  - This is the bridge-side single source of truth for the local planner path
+  - If the helper-local planner skill moves or is renamed, update this field instead of hardcoding the new path in prompts or code
+- `fullAgentPromptPath`
+  - Full-agent prompt file for fully authorized players
 - `helperWorkspacePath`
   - Workspace root where the downstream `mc-helper` agent should run; the bridge uses it as the `openclaw agent` subprocess `cwd`
 
@@ -45,6 +57,51 @@ This file explains the fields in `bridge_config.json` as the bridge works today.
   - OpenClaw agent id to call, currently `mc-helper`
 - `agentTimeoutSeconds`
   - Timeout passed to the agent call itself; the bridge also adds a small local buffer around the helper process
+- `routerConfidenceThreshold`
+  - Minimum confidence required before a privileged route above `chat` is trusted
+
+## Privileged routing / auth
+
+- `auth.groups`
+  - Named permission groups; each group exposes a `max_mode`
+- `auth.players`
+  - Player-to-groups mapping; this is where you grant players access to `assist`, `command`, or `full_agent`
+- `modeSessionWindowSeconds`
+  - Per-mode active-session windows for natural-language follow-ups; supports `assist`, `command`, `full_agent`, and optional `default`
+
+Mode meanings:
+- `chat`
+  - normal public chat only
+- `assist`
+  - model-judged Minecraft assistance with command execution
+- `command`
+  - stronger Minecraft command execution
+- `full_agent`
+  - full OpenClaw-style agent work with tools/computer control plus optional Minecraft commands
+
+Behavior notes:
+- Privileged routing is only attempted for players whose configured `max_mode` is above `chat`, or who already have an active privileged session
+- Public reply is still the default; private reply only happens when the player explicitly asks for it
+- Privileged sessions are tracked per player, not globally
+- Continuation phrases such as `again`, `one more`, or `再来一组` can reuse the player's last successful privileged command context
+
+## Helper-local planner wiring
+
+The helper-local Minecraft command planner is outside this repo's `docs/` tree, but bridge behavior depends on it.
+
+Current moving parts:
+- Helper-local skill directory:
+  `C:\Users\Administrator\.openclaw\workspace-mc-helper\skills\mc-command-planner`
+- Bridge-side planner script path:
+  `commandPlannerScriptPath`
+- OpenClaw skill discovery registration:
+  `C:\Users\Administrator\.openclaw\openclaw.json`
+  `skills.load.extraDirs`
+
+Pitfalls:
+- If you rename or move the helper-local planner skill without updating `commandPlannerScriptPath`, privileged fallback planning will silently stop working
+- If you move the helper-local skill directory without updating `skills.load.extraDirs`, the skill may disappear from the Control UI and runtime skill list
+- Do not duplicate the planner path in multiple prompt or doc files; keep the path authoritative in `bridge_config.json`
 
 ## Message filtering
 
@@ -111,6 +168,10 @@ Behavior note:
   - How many bot replies to keep in persisted state
 - `playerHistoryStateSize`
   - How many recent messages to keep per player in persisted state
+
+Additional persisted state:
+- `playerSessions`
+  - Per-player active privileged session metadata, including current mode, session id, topic, and private-reply preference
 
 ## Debug logging
 

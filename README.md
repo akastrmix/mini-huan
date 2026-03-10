@@ -44,10 +44,18 @@ Bridge public-chat policy lives here:
 - [bridge_config.json](/C:/Users/Administrator/.openclaw/workspace-mc-bridge/config/bridge_config.json)
 - [judge_prompt.txt](/C:/Users/Administrator/.openclaw/workspace-mc-bridge/config/judge_prompt.txt)
 - [reply_prompt.txt](/C:/Users/Administrator/.openclaw/workspace-mc-bridge/config/reply_prompt.txt)
+- [router_prompt.txt](/C:/Users/Administrator/.openclaw/workspace-mc-bridge/config/router_prompt.txt)
+- [assist_prompt.txt](/C:/Users/Administrator/.openclaw/workspace-mc-bridge/config/assist_prompt.txt)
+- [command_prompt.txt](/C:/Users/Administrator/.openclaw/workspace-mc-bridge/config/command_prompt.txt)
+- [full_agent_prompt.txt](/C:/Users/Administrator/.openclaw/workspace-mc-bridge/config/full_agent_prompt.txt)
 
 Bridge project documentation lives here:
 - [CONFIG_FIELDS.md](/C:/Users/Administrator/.openclaw/workspace-mc-bridge/docs/CONFIG_FIELDS.md)
 - [CHAT_QUALITY.md](/C:/Users/Administrator/.openclaw/workspace-mc-bridge/docs/CHAT_QUALITY.md)
+
+Helper-local command planning lives here:
+- [SKILL.md](/C:/Users/Administrator/.openclaw/workspace-mc-helper/skills/mc-command-planner/SKILL.md)
+- [plan-mc-command.py](/C:/Users/Administrator/.openclaw/workspace-mc-helper/skills/mc-command-planner/scripts/plan-mc-command.py)
 
 Bridge runtime behavior lives in code:
 - [mc_ai_bridge.py](/C:/Users/Administrator/.openclaw/workspace-mc-bridge/app/mc_ai_bridge.py)
@@ -82,11 +90,13 @@ If you just opened this project and want the fastest path to understanding it, r
 2. [bridge_config.json](/C:/Users/Administrator/.openclaw/workspace-mc-bridge/config/bridge_config.json)
 3. [judge_prompt.txt](/C:/Users/Administrator/.openclaw/workspace-mc-bridge/config/judge_prompt.txt)
 4. [reply_prompt.txt](/C:/Users/Administrator/.openclaw/workspace-mc-bridge/config/reply_prompt.txt)
-5. [mc_ai_bridge.py](/C:/Users/Administrator/.openclaw/workspace-mc-bridge/app/mc_ai_bridge.py)
+5. [router_prompt.txt](/C:/Users/Administrator/.openclaw/workspace-mc-bridge/config/router_prompt.txt)
+6. [mc_ai_bridge.py](/C:/Users/Administrator/.openclaw/workspace-mc-bridge/app/mc_ai_bridge.py)
 
 Mental model:
 - A Minecraft chat line comes in from `latest.log`
 - The bridge stores short-term context in runtime state
+- If the player is configured for privileged modes, the bridge can first route the turn into `assist`, `command`, or `full_agent`
 - The judge step decides whether the bot should speak
 - The reply step generates the final message only if judge passes
 - The bridge sends the message back to Minecraft via RCON
@@ -103,9 +113,10 @@ Fresh-session defaults:
 Minecraft latest.log
   -> app/mc_log_listener.py parses log lines
   -> app/mc_ai_bridge.py records short-term context
-  -> app/mc_ai_bridge.py calls judge via mc-helper
+  -> app/mc_ai_bridge.py optionally routes privileged players into assist/command/full_agent
+  -> normal chat still uses judge via mc-helper
   -> if approved, app/mc_ai_bridge.py calls reply via mc-helper
-  -> app/mc_ai_bridge.py sends the reply via RCON
+  -> privileged modes can execute RCON commands and/or send a reply
   -> Minecraft tellraw @a
 ```
 
@@ -119,12 +130,22 @@ Minecraft latest.log
   - bridge-owned should-reply policy
 - [reply_prompt.txt](/C:/Users/Administrator/.openclaw/workspace-mc-bridge/config/reply_prompt.txt)
   - bridge-owned reply constraints layered on top of helper persona
+- [router_prompt.txt](/C:/Users/Administrator/.openclaw/workspace-mc-bridge/config/router_prompt.txt)
+  - natural-language routing into `chat`, `assist`, `command`, or `full_agent`
+- [assist_prompt.txt](/C:/Users/Administrator/.openclaw/workspace-mc-bridge/config/assist_prompt.txt)
+  - permissive light-to-medium in-game assistance with model judgment
+- [command_prompt.txt](/C:/Users/Administrator/.openclaw/workspace-mc-bridge/config/command_prompt.txt)
+  - stronger Minecraft command execution for trusted players
+- [full_agent_prompt.txt](/C:/Users/Administrator/.openclaw/workspace-mc-bridge/config/full_agent_prompt.txt)
+  - fully authorized agent turns, including tools/computer work plus optional Minecraft commands
 - [bridge_context.py](/C:/Users/Administrator/.openclaw/workspace-mc-bridge/app/bridge_context.py)
   - context scoring, player/bot history selection, and human-answer detection
 - [bridge_judge.py](/C:/Users/Administrator/.openclaw/workspace-mc-bridge/app/bridge_judge.py)
   - judge parsing, refusal/direct overrides, and gating
+- [bridge_privileged.py](/C:/Users/Administrator/.openclaw/workspace-mc-bridge/app/bridge_privileged.py)
+  - permission resolution, routing parse, and privileged result parsing
 - [bridge_delivery.py](/C:/Users/Administrator/.openclaw/workspace-mc-bridge/app/bridge_delivery.py)
-  - RCON delivery and tellraw formatting
+  - RCON delivery, tellraw formatting, private replies, and direct command execution
 - [bridge_state.py](/C:/Users/Administrator/.openclaw/workspace-mc-bridge/app/bridge_state.py)
   - persisted bridge state and atomic saves
 - [bridge_components.py](/C:/Users/Administrator/.openclaw/workspace-mc-bridge/app/bridge_components.py)
@@ -177,6 +198,59 @@ Current delivery:
 - Prefix format: `<mini-huan>`
 - `mini-huan` in `aqua`
 - Brackets and content in `white`
+
+## Privileged Capability Routing
+
+The bridge can now expose extra natural-language abilities to selected players through `auth.groups` and `auth.players` in [bridge_config.json](/C:/Users/Administrator/.openclaw/workspace-mc-bridge/config/bridge_config.json).
+
+Available modes:
+- `chat`
+  - normal public chat behavior
+- `assist`
+  - model-judged in-game assistance with Minecraft command execution
+- `command`
+  - stronger Minecraft command execution
+- `full_agent`
+  - full OpenClaw-style agent turns, including tools/computer control and optional Minecraft commands
+
+Notes:
+- Privileged routing is only attempted for players whose configured max mode is above `chat`, or who already have an active privileged session
+- Sessions are tracked per player, not globally
+- Public reply remains the default; private reply only happens when the player explicitly asks for it
+
+## Helper-local Planner
+
+The helper-local Minecraft command planner is a helper-side skill, not a bridge-side skill.
+
+Important wiring:
+- Bridge-side single source of truth for the planner script path:
+  [bridge_config.json](/C:/Users/Administrator/.openclaw/workspace-mc-bridge/config/bridge_config.json)
+  `commandPlannerScriptPath`
+- OpenClaw runtime skill discovery must also include the helper-local skills directory through:
+  `C:\Users\Administrator\.openclaw\openclaw.json`
+  `skills.load.extraDirs`
+
+Current helper-local skill:
+- Name: `mc-command-planner`
+- Directory:
+  [mc-command-planner](/C:/Users/Administrator/.openclaw/workspace-mc-helper/skills/mc-command-planner)
+
+Current generic execution skill kept separate:
+- Name: `mc-rcon-exec`
+- Directory:
+  [mc-rcon-exec](/C:/Users/Administrator/.openclaw/workspace/skills/mc-rcon-exec)
+
+Behavior notes:
+- The helper-local planner is planner-first; the bridge still owns actual RCON delivery
+- Follow-up shorthand like `again`, `one more`, or `再来一组` is resolved using per-player last successful privileged execution context
+- If the privileged helper route errors, the bridge can fall back to the helper-local planner script
+
+Sync checklist when planner behavior changes:
+- Update [bridge_config.json](/C:/Users/Administrator/.openclaw/workspace-mc-bridge/config/bridge_config.json) if the planner script path changes
+- Update `C:\Users\Administrator\.openclaw\openclaw.json` if the helper-local skill directory changes
+- Update [AGENTS.md](/C:/Users/Administrator/.openclaw/workspace-mc-helper/AGENTS.md)
+- Update [AGENTS.md](/C:/Users/Administrator/.openclaw/workspace-mc-bridge/helper_seed/AGENTS.md)
+- Update [CONFIG_FIELDS.md](/C:/Users/Administrator/.openclaw/workspace-mc-bridge/docs/CONFIG_FIELDS.md)
 
 ## Ops
 
