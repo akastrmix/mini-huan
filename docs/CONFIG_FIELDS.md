@@ -51,7 +51,7 @@ This file explains the fields in `bridge_config.json` as the bridge works today.
 - `maxMessageChars`
   - Ignore chat messages longer than this
 - `maxReplyChars`
-  - Soft ceiling passed into the reply payload
+  - Hard ceiling for delivered replies; also passed into the reply payload as guidance
 - `languageHint`
   - Human-readable hint about reply language selection
 
