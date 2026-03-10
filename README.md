@@ -47,10 +47,16 @@ Bridge public-chat policy lives here:
 
 Bridge project documentation lives here:
 - [CONFIG_FIELDS.md](/C:/Users/Administrator/.openclaw/workspace-mc-bridge/docs/CONFIG_FIELDS.md)
+- [CHAT_QUALITY.md](/C:/Users/Administrator/.openclaw/workspace-mc-bridge/docs/CHAT_QUALITY.md)
 
 Bridge runtime behavior lives in code:
 - [mc_ai_bridge.py](/C:/Users/Administrator/.openclaw/workspace-mc-bridge/app/mc_ai_bridge.py)
+- [bridge_context.py](/C:/Users/Administrator/.openclaw/workspace-mc-bridge/app/bridge_context.py)
+- [bridge_judge.py](/C:/Users/Administrator/.openclaw/workspace-mc-bridge/app/bridge_judge.py)
+- [bridge_delivery.py](/C:/Users/Administrator/.openclaw/workspace-mc-bridge/app/bridge_delivery.py)
+- [bridge_state.py](/C:/Users/Administrator/.openclaw/workspace-mc-bridge/app/bridge_state.py)
 - [bridge_components.py](/C:/Users/Administrator/.openclaw/workspace-mc-bridge/app/bridge_components.py)
+  - compatibility re-exports for older imports
 
 Current bot naming:
 - English name: `mini-huan`
@@ -113,8 +119,16 @@ Minecraft latest.log
   - bridge-owned should-reply policy
 - [reply_prompt.txt](/C:/Users/Administrator/.openclaw/workspace-mc-bridge/config/reply_prompt.txt)
   - bridge-owned reply constraints layered on top of helper persona
+- [bridge_context.py](/C:/Users/Administrator/.openclaw/workspace-mc-bridge/app/bridge_context.py)
+  - context scoring, player/bot history selection, and human-answer detection
+- [bridge_judge.py](/C:/Users/Administrator/.openclaw/workspace-mc-bridge/app/bridge_judge.py)
+  - judge parsing, refusal/direct overrides, and gating
+- [bridge_delivery.py](/C:/Users/Administrator/.openclaw/workspace-mc-bridge/app/bridge_delivery.py)
+  - RCON delivery and tellraw formatting
+- [bridge_state.py](/C:/Users/Administrator/.openclaw/workspace-mc-bridge/app/bridge_state.py)
+  - persisted bridge state and atomic saves
 - [bridge_components.py](/C:/Users/Administrator/.openclaw/workspace-mc-bridge/app/bridge_components.py)
-  - context selection, gating, helper invocation, and delivery components
+  - compatibility layer for existing imports
 - [mc_ai_bridge_state.json](/C:/Users/Administrator/.openclaw/workspace-mc-bridge/runtime/mc_ai_bridge_state.json)
   - persisted short-term bridge state
 - [bridge.out.log](/C:/Users/Administrator/.openclaw/workspace-mc-bridge/runtime/logs/bridge.out.log)
@@ -205,3 +219,12 @@ Quick diagnosis:
 - Bot replies oddly: inspect judge/reply inputs and selected context
 - Bot uses stale context: inspect age/window settings
 - Bot is too noisy or too quiet: adjust `judge_prompt.txt` and thresholds before changing reply style
+
+## Chat Quality Tools
+
+- Quality report:
+  `python .\scripts\bridge_quality_report.py`
+- Replay regression cases:
+  `python -m unittest tests.test_chat_replays -v`
+- Details:
+  [CHAT_QUALITY.md](/C:/Users/Administrator/.openclaw/workspace-mc-bridge/docs/CHAT_QUALITY.md)

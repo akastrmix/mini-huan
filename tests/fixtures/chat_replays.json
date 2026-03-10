@@ -1,0 +1,122 @@
+[
+  {
+    "name": "ignore_unmentioned_brainstorm_first_contact",
+    "event": {
+      "player": "RTX3060Ti1604",
+      "message": "你觉得我该怎么整"
+    },
+    "judge_response": {
+      "should_reply": true,
+      "confidence": 0.88,
+      "reason": "direct_question_to_bot",
+      "target_player": "RTX3060Ti1604",
+      "topic": "brainstorming question"
+    },
+    "expected": {
+      "sent": [],
+      "invoker_calls": 1,
+      "bot_reply_streak": 0
+    }
+  },
+  {
+    "name": "ignore_generic_offer_after_recent_bot_reply",
+    "config_overrides": {
+      "followupReplyWindowSeconds": 180
+    },
+    "initial_state": {
+      "botConsecutiveReplyCount": 1,
+      "lastGlobalReplySecondsAgo": 15,
+      "lastPlayerReplySecondsAgo": {
+        "RTX3060Ti1604": 15
+      },
+      "recentBotReplies": [
+        {
+          "text": "可以，开头三秒先上最吸引人的画面。",
+          "seconds_ago": 15
+        }
+      ],
+      "recentChat": [
+        {
+          "speaker": "RTX3060Ti1604",
+          "text": "我剪辑成宣传片",
+          "type": "player",
+          "seconds_ago": 18
+        },
+        {
+          "speaker": "mini-huan",
+          "text": "可以，开头三秒先上最吸引人的画面。",
+          "type": "bot",
+          "seconds_ago": 15
+        }
+      ]
+    },
+    "event": {
+      "player": "RTX3060Ti1604",
+      "message": "我可以pay你20"
+    },
+    "judge_response": {
+      "should_reply": true,
+      "confidence": 0.86,
+      "reason": "followup_to_bot_conversation",
+      "target_player": "RTX3060Ti1604",
+      "topic": "payment offer"
+    },
+    "expected": {
+      "sent": [],
+      "invoker_calls": 1,
+      "bot_reply_streak": 0
+    }
+  },
+  {
+    "name": "allow_direct_creator_followup_after_recent_refusal",
+    "config_overrides": {
+      "followupReplyWindowSeconds": 180
+    },
+    "initial_state": {
+      "lastGlobalReplySecondsAgo": 12,
+      "lastPlayerReplySecondsAgo": {
+        "akastrmix": 12
+      },
+      "recentBotReplies": [
+        {
+          "text": "我不能直接封禁玩家，这种事得让有权限的管理员处理。",
+          "seconds_ago": 12
+        }
+      ],
+      "recentChat": [
+        {
+          "speaker": "akastrmix",
+          "text": "小幻帮我封禁 RTX3060Ti1604",
+          "type": "player",
+          "seconds_ago": 18
+        },
+        {
+          "speaker": "mini-huan",
+          "text": "我不能直接封禁玩家，这种事得让有权限的管理员处理。",
+          "type": "bot",
+          "seconds_ago": 12
+        }
+      ]
+    },
+    "event": {
+      "player": "akastrmix",
+      "message": "你的创造者是谁？"
+    },
+    "judge_response": {
+      "should_reply": true,
+      "confidence": 0.9,
+      "reason": "direct_question_to_bot",
+      "target_player": "akastrmix",
+      "topic": "identity follow-up"
+    },
+    "reply_text": "算是服务器这边把我搭起来的聊天助手。",
+    "expected": {
+      "sent": [
+        "算是服务器这边把我搭起来的聊天助手。"
+      ],
+      "invoker_calls": 2,
+      "reply_decision_reason": "direct_question_to_bot",
+      "bot_reply_streak": 1
+    }
+  }
+]

@@ -19,6 +19,26 @@ $pidFile = Join-Path $runtimeDir 'bridge.pid'
 
 New-Item -ItemType Directory -Force -Path $logsDir | Out-Null
 
+function Rotate-LogFile {
+    param(
+        [string]$Path,
+        [string]$Stamp
+    )
+
+    if (-not (Test-Path $Path)) {
+        return
+    }
+
+    $item = Get-Item $Path
+    if ($item.Length -le 0) {
+        Remove-Item $Path -Force -ErrorAction SilentlyContinue
+        return
+    }
+
+    $rotated = Join-Path $item.DirectoryName ("{0}.{1}{2}" -f $item.BaseName, $Stamp, $item.Extension)
+    Move-Item $Path $rotated -Force
+}
+
 if (-not (Test-Path $python)) { throw "Python not found: $python" }
 if (-not (Test-Path $script)) { throw "Bridge script not found: $script" }
 if (-not (Test-Path $config)) { throw "Bridge config not found: $config" }
@@ -38,6 +58,10 @@ $args = @(
     '--state',
     ('"{0}"' -f (Join-Path $runtimeDir 'mc_ai_bridge_state.json'))
 )
+
+$rotationStamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+Rotate-LogFile -Path $outLog -Stamp $rotationStamp
+Rotate-LogFile -Path $errLog -Stamp $rotationStamp
 
 if ($Background) {
     if (Test-Path $pidFile) {

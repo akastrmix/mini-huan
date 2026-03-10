@@ -30,11 +30,19 @@ Write-Host "Err log: $errLog"
 if (Test-Path $outLog) {
     Write-Host ''
     Write-Host 'Last output lines:'
-    Get-Content $outLog -Tail 10 -Encoding utf8
+    try {
+        Get-Content $outLog -Tail 10 -Encoding utf8 -ErrorAction Stop
+    } catch {
+        Write-Host '(output log not readable yet)'
+    }
 }
 
 if (Test-Path $errLog) {
     Write-Host ''
     Write-Host 'Last error lines:'
-    Get-Content $errLog -Tail 10 -Encoding utf8
+    try {
+        Get-Content $errLog -Tail 10 -Encoding utf8 -ErrorAction Stop
+    } catch {
+        Write-Host '(error log not readable yet)'
+    }
 }

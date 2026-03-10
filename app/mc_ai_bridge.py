@@ -127,6 +127,7 @@ class MCAIBridge:
             )
             decision = self.judge.parse(judge_text, event)
             decision = self.judge.maybe_override_decline(event, decision, judge_context)
+            decision = self.judge.apply_public_chat_guard(event, decision, judge_context)
         except Exception as exc:
             self.logger.emit({"bridge": "error", "stage": "judge", "error": str(exc), "event": event}, error=False)
             return None, None, "judge_error"
@@ -155,7 +156,42 @@ class MCAIBridge:
         if not reply or reply == "NO_REPLY":
             self.logger.emit({"bridge": "no_reply", "event": event, "raw": raw})
             return None, raw, "no_reply"
+        if self.reply_looks_like_agent_error(reply):
+            self.logger.emit({"bridge": "error", "stage": "reply_payload", "error": reply, "event": event})
+            return None, raw, "reply_error"
+        original_reply_length = len(reply)
+        max_reply_chars = int(self.config.get("maxReplyChars", 80))
+        if max_reply_chars > 0 and len(reply) > max_reply_chars:
+            truncated = reply[:max_reply_chars].rstrip()
+            reply = truncated or reply[:max_reply_chars]
+            self.logger.emit(
+                {
+                    "bridge": "reply_truncated",
+                    "event": event,
+                    "decision": decision,
+                    "max_chars": max_reply_chars,
+                    "original_length": original_reply_length,
+                    "sent_length": len(reply),
+                },
+                force=self.logger.summary_logs_enabled(),
+            )
         return reply, raw, "ok"
+
+    def reply_looks_like_agent_error(self, reply: str):
+        text = (reply or "").strip()
+        if not text:
+            return False
+        if text.startswith("Codex error:"):
+            return True
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            return False
+        if not isinstance(parsed, dict):
+            return False
+        if parsed.get("type") == "error" and parsed.get("error"):
+            return True
+        return bool(parsed.get("error"))
 
     def finalize_reply(self, event: dict, decision: dict, reply: str):
         try:

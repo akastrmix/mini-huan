@@ -18,6 +18,35 @@ DEBUG_PATH = BASE_DIR / "runtime" / "last_invoke_debug.txt"
 PROCESS_TIMEOUT_BUFFER_SECONDS = 15
 
 
+def parse_json_maybe(text: str):
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return None
+
+
+def extract_agent_error_message(raw_text: str):
+    text = (raw_text or "").strip()
+    if not text:
+        return ""
+    parsed = parse_json_maybe(text)
+    if isinstance(parsed, dict):
+        if parsed.get("type") == "error" and parsed.get("error"):
+            message = ((parsed.get("error") or {}).get("message") or "").strip()
+            return message or text
+        if parsed.get("error"):
+            message = ((parsed.get("error") or {}).get("message") or "").strip()
+            return message or text
+    if text.startswith("Codex error:"):
+        suffix = text.split(":", 1)[1].strip()
+        parsed_suffix = parse_json_maybe(suffix)
+        if isinstance(parsed_suffix, dict) and parsed_suffix.get("error"):
+            message = ((parsed_suffix.get("error") or {}).get("message") or "").strip()
+            return message or text
+        return text
+    return ""
+
+
 def write_debug(
     prompt_path: str,
     task_payload: dict,
@@ -112,13 +141,20 @@ def main():
     raw = (proc.stdout or "").strip()
     text = ""
     session = ""
-    try:
-        data = json.loads(raw)
+    data = parse_json_maybe(raw)
+    if data is None:
+        text = raw
+    else:
+        error_message = extract_agent_error_message(raw)
+        if error_message:
+            raise SystemExit(f"openclaw agent returned an error payload: {error_message}")
         payloads = ((data.get("result") or {}).get("payloads") or [])
         text = ((payloads[0].get("text") if payloads else "") or "").strip()
         session = (((data.get("result") or {}).get("meta") or {}).get("agentMeta") or {}).get("sessionId") or ""
-    except json.JSONDecodeError:
-        text = raw
+
+    error_message = extract_agent_error_message(text)
+    if error_message:
+        raise SystemExit(f"openclaw agent returned an error reply: {error_message}")
 
     Path(out_file).write_text(json.dumps({"reply": text, "sessionId": session}, ensure_ascii=False), encoding="utf-8")
 

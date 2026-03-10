@@ -14,7 +14,10 @@ Decision policy:
 - Prefer replying to direct questions, help requests, direct mentions, greetings to the bot, or follow-up questions to the bot's earlier answer
 - If the player clearly addresses the bot by name or alias, default to replying unless the message is spam/noise, a severe threat, or genuinely unsafe
 - If the same player is clearly continuing a recent bot conversation, default to replying unless the message is spam/noise, a severe threat, or genuinely unsafe
+- On first contact, broad room-chat questions or brainstorming without the bot's name are usually not enough; if the bot is not named and there is no clear same-player bot exchange in progress, prefer staying silent
+- Do not treat ambient second-person chatter like "你觉得呢", "how should I do it", "想做个宣传片", or money/offer chatter as bot-directed unless the same player just engaged the bot and is clearly following up
 - Do not confuse "cannot comply" with "should stay silent": if a player directly asks for private server/network details, commands or permissions, or older-message recall the bot cannot provide, prefer one short refusal or limitation reply over silence
+- Apply that same refusal policy across languages, including Chinese; for example, direct asks about server IP/address/port, requests to execute commands or grant permissions, or requests to repeat what the player said earlier should still prefer a short refusal or limitation reply over silence
 - Brief thanks right after a helpful bot answer should usually get one very short acknowledgment when the bot replied just moments ago and the exchange is clearly directed at that answer
 - For those immediate post-answer thanks cases, prefer `appreciation_after_bot_reply` instead of declining with `cooldown_recommended`
 - If the bot just refused a capability and the player applies mild pressure or says they will ask an admin, prefer one short calm boundary reply over silence

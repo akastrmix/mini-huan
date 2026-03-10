@@ -4,12 +4,14 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 APP_DIR = Path(__file__).resolve().parents[1] / "app"
 if str(APP_DIR) not in sys.path:
     sys.path.insert(0, str(APP_DIR))
 
 from bridge_components import BridgeState, ContextBuilder, Logger
+import bridge_state
 from bridge_config import load_config
 from mc_ai_bridge import MCAIBridge
 
@@ -109,6 +111,22 @@ class BridgeTests(unittest.TestCase):
             self.assertEqual(state.bot_reply_streak(), 1)
             self.assertEqual(state.data["recentBotReplies"][-1]["text"], "hello there")
             self.assertEqual(state.data["recentChat"][-1]["speaker"], "mini-huan")
+
+    def test_bridge_state_save_uses_atomic_replace(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = self.make_state(tmpdir)
+            state.data["sessionId"] = "session-1"
+
+            with mock.patch.object(bridge_state.os, "replace", wraps=bridge_state.os.replace) as replace_mock:
+                with mock.patch.object(bridge_state.os, "fsync", wraps=bridge_state.os.fsync) as fsync_mock:
+                    state.save()
+
+            self.assertTrue(replace_mock.called)
+            fsync_mock.assert_not_called()
+            self.assertEqual(
+                json.loads((Path(tmpdir) / "state.json").read_text(encoding="utf-8"))["sessionId"],
+                "session-1",
+            )
 
     def test_build_judge_context_expires_stale_bot_reply_streak(self):
         config = self.make_config()
@@ -262,7 +280,17 @@ class BridgeTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             state = self.make_state(tmpdir)
+            now = time.time()
             state.data["botConsecutiveReplyCount"] = 1
+            state.data["lastGlobalReplyTs"] = now - 8
+            state.data["lastPlayerReplyTs"] = {"alice": now - 8}
+            state.data["recentBotReplies"] = [
+                {"text": "Earlier bot reply.", "timestamp": now - 8},
+            ]
+            state.data["recentChat"] = [
+                {"speaker": "alice", "text": "thanks?", "timestamp": now - 12, "type": "player"},
+                {"speaker": "mini-huan", "text": "Earlier bot reply.", "timestamp": now - 8, "type": "bot"},
+            ]
             bridge = MCAIBridge(config=config, state=state)
             bridge.invoker = StubInvoker([
                 (json.dumps({
@@ -287,7 +315,17 @@ class BridgeTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             state = self.make_state(tmpdir)
+            now = time.time()
             state.data["botConsecutiveReplyCount"] = 1
+            state.data["lastGlobalReplyTs"] = now - 8
+            state.data["lastPlayerReplyTs"] = {"alice": now - 8}
+            state.data["recentBotReplies"] = [
+                {"text": "Earlier bot reply.", "timestamp": now - 8},
+            ]
+            state.data["recentChat"] = [
+                {"speaker": "alice", "text": "help me", "timestamp": now - 12, "type": "player"},
+                {"speaker": "mini-huan", "text": "Earlier bot reply.", "timestamp": now - 8, "type": "bot"},
+            ]
             bridge = MCAIBridge(config=config, state=state)
             bridge.invoker = StubInvoker([
                 (json.dumps({
@@ -693,6 +731,7 @@ class BridgeTests(unittest.TestCase):
 
     def test_handle_event_turns_direct_memory_limit_request_into_refusal_reply(self):
         config = self.make_config()
+        config["maxReplyChars"] = 200
 
         with tempfile.TemporaryDirectory() as tmpdir:
             state = self.make_state(tmpdir)
@@ -717,6 +756,235 @@ class BridgeTests(unittest.TestCase):
                 ["I only keep short recent chat context, so I may not remember older messages exactly."],
             )
             self.assertEqual(invoker.calls[1]["payload"]["decision"]["reason"], "memory_limit_refusal")
+
+    def test_handle_event_turns_direct_chinese_refusal_requests_into_reply(self):
+        config = self.make_config()
+        config["maxReplyChars"] = 200
+
+        cases = [
+            ("\u5c0f\u5e7b \u53ef\u4ee5\u544a\u8bc9\u6211\u670d\u52a1\u5668IP\u5417", "privacy_refusal", "\u4e0d\u80fd\u5728\u516c\u804a\u91cc\u53d1\u8fd9\u4e2a\uff0c\u95ee\u7ba1\u7406\u5458\u5427\u3002"),
+            ("\u5c0f\u5e7b \u53ef\u4ee5\u5e2e\u6211\u6267\u884c\u547d\u4ee4\u5417", "capability_refusal", "\u6211\u4e0d\u80fd\u5e2e\u4f60\u6267\u884c\u547d\u4ee4\uff0c\u53ef\u4ee5\u627e\u7ba1\u7406\u5458\u3002"),
+            ("\u5c0f\u5e7b \u4f60\u8bb0\u5f97\u6211\u521a\u624d\u8bf4\u4e86\u4ec0\u4e48\u5417", "memory_limit_refusal", "\u6211\u53ea\u4f1a\u4fdd\u7559\u6700\u8fd1\u7684\u5bf9\u8bdd\uff0c\u66f4\u65e9\u7684\u4e0d\u4e00\u5b9a\u8bb0\u5f97\u51c6\u3002"),
+        ]
+
+        for message, reason, reply_text in cases:
+            with self.subTest(reason=reason):
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    state = self.make_state(tmpdir)
+                    bridge = MCAIBridge(config=config, state=state)
+                    invoker = CapturingInvoker([
+                        (json.dumps({
+                            "should_reply": False,
+                            "confidence": 0.9,
+                            "reason": "unsafe_or_out_of_scope",
+                            "target_player": "alice",
+                            "topic": "declined",
+                        }, ensure_ascii=False), {}),
+                        (reply_text, {"reply": reply_text}),
+                    ])
+                    bridge.invoker = invoker
+                    bridge.delivery = StubDelivery()
+
+                    bridge.handle_event({"type": "chat", "player": "alice", "message": message, "raw": f"<alice> {message}"})
+
+                    self.assertEqual(bridge.delivery.sent, [reply_text])
+                    self.assertEqual(invoker.calls[1]["payload"]["decision"]["reason"], reason)
+
+    def test_handle_event_truncates_reply_to_max_chars(self):
+        config = self.make_config()
+        config["maxReplyChars"] = 5
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = self.make_state(tmpdir)
+            bridge = MCAIBridge(config=config, state=state)
+            bridge.invoker = StubInvoker([
+                (json.dumps({
+                    "should_reply": True,
+                    "confidence": 0.95,
+                    "reason": "direct_question_to_bot",
+                    "target_player": "alice",
+                    "topic": "short cap",
+                }), {}),
+                ("1234567890", {"reply": "1234567890"}),
+            ])
+            bridge.delivery = StubDelivery()
+
+            bridge.handle_event({"type": "chat", "player": "alice", "message": "hi huan?", "raw": "<alice> hi huan?"})
+
+            self.assertEqual(bridge.delivery.sent, ["12345"])
+            self.assertEqual(state.data["recentBotReplies"][-1]["text"], "12345")
+
+    def test_handle_event_does_not_send_agent_error_text(self):
+        config = self.make_config()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = self.make_state(tmpdir)
+            bridge = MCAIBridge(config=config, state=state)
+            bridge.invoker = StubInvoker([
+                (json.dumps({
+                    "should_reply": True,
+                    "confidence": 0.95,
+                    "reason": "direct_question_to_bot",
+                    "target_player": "alice",
+                    "topic": "question",
+                }), {}),
+                ("Codex error: {\"type\":\"error\",\"error\":{\"message\":\"temporary failure\"}}", {"reply": "Codex error"}),
+            ])
+            bridge.delivery = StubDelivery()
+
+            bridge.handle_event({"type": "chat", "player": "alice", "message": "hi huan?", "raw": "<alice> hi huan?"})
+
+            self.assertEqual(bridge.delivery.sent, [])
+            self.assertEqual(state.data["botConsecutiveReplyCount"], 0)
+
+    def test_handle_event_does_not_reply_to_unmentioned_generic_brainstorm(self):
+        config = self.make_config()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = self.make_state(tmpdir)
+            bridge = MCAIBridge(config=config, state=state)
+            invoker = CapturingInvoker([
+                (json.dumps({
+                    "should_reply": True,
+                    "confidence": 0.88,
+                    "reason": "direct_question_to_bot",
+                    "target_player": "alice",
+                    "topic": "brainstorming question",
+                }, ensure_ascii=False), {}),
+            ])
+            bridge.invoker = invoker
+            bridge.delivery = StubDelivery()
+
+            message = "你觉得我该怎么整"
+            bridge.handle_event({"type": "chat", "player": "alice", "message": message, "raw": f"<alice> {message}"})
+
+            self.assertEqual(bridge.delivery.sent, [])
+            self.assertEqual(len(invoker.calls), 1)
+            self.assertEqual(state.data["botConsecutiveReplyCount"], 0)
+
+    def test_handle_event_does_not_continue_same_player_exchange_on_generic_offer(self):
+        config = self.make_config()
+        config["followupReplyWindowSeconds"] = 180
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = self.make_state(tmpdir)
+            now = time.time()
+            state.data["lastGlobalReplyTs"] = now - 15
+            state.data["lastPlayerReplyTs"] = {"alice": now - 15}
+            state.data["botConsecutiveReplyCount"] = 1
+            state.data["recentBotReplies"] = [
+                {"text": "可以，开头三秒先上最吸引人的画面。", "timestamp": now - 15},
+            ]
+            state.data["recentChat"] = [
+                {"speaker": "mini-huan", "text": "可以，开头三秒先上最吸引人的画面。", "timestamp": now - 15, "type": "bot"},
+            ]
+            bridge = MCAIBridge(config=config, state=state)
+            invoker = CapturingInvoker([
+                (json.dumps({
+                    "should_reply": True,
+                    "confidence": 0.86,
+                    "reason": "followup_to_bot_conversation",
+                    "target_player": "alice",
+                    "topic": "payment offer",
+                }, ensure_ascii=False), {}),
+            ])
+            bridge.invoker = invoker
+            bridge.delivery = StubDelivery()
+
+            message = "我可以pay你20"
+            bridge.handle_event({"type": "chat", "player": "alice", "message": message, "raw": f"<alice> {message}"})
+
+            self.assertEqual(bridge.delivery.sent, [])
+            self.assertEqual(len(invoker.calls), 1)
+            self.assertEqual(state.data["botConsecutiveReplyCount"], 0)
+
+    def test_handle_event_allows_same_player_followup_question_without_renaming_bot(self):
+        config = self.make_config()
+        config["followupReplyWindowSeconds"] = 180
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = self.make_state(tmpdir)
+            now = time.time()
+            state.data["lastGlobalReplyTs"] = now - 12
+            state.data["lastPlayerReplyTs"] = {"alice": now - 12}
+            state.data["recentBotReplies"] = [
+                {"text": "我不能直接封禁玩家，这种事得让管理员处理。", "timestamp": now - 12},
+            ]
+            state.data["recentChat"] = [
+                {"speaker": "mini-huan", "text": "我不能直接封禁玩家，这种事得让管理员处理。", "timestamp": now - 12, "type": "bot"},
+            ]
+            bridge = MCAIBridge(config=config, state=state)
+            bridge.invoker = StubInvoker([
+                (json.dumps({
+                    "should_reply": True,
+                    "confidence": 0.9,
+                    "reason": "direct_question_to_bot",
+                    "target_player": "alice",
+                    "topic": "identity follow-up",
+                }, ensure_ascii=False), {}),
+                ("算是服务器这边把我搭起来的聊天助手。", {"reply": "算是服务器这边把我搭起来的聊天助手。"}),
+            ])
+            bridge.delivery = StubDelivery()
+
+            message = "你的创造者是谁？"
+            bridge.handle_event({"type": "chat", "player": "alice", "message": message, "raw": f"<alice> {message}"})
+
+            self.assertEqual(bridge.delivery.sent, ["算是服务器这边把我搭起来的聊天助手。"])
+            self.assertEqual(state.data["botConsecutiveReplyCount"], 1)
+
+    def test_handle_event_does_not_turn_normal_chinese_address_question_into_privacy_refusal(self):
+        config = self.make_config()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = self.make_state(tmpdir)
+            bridge = MCAIBridge(config=config, state=state)
+            invoker = CapturingInvoker([
+                (json.dumps({
+                    "should_reply": False,
+                    "confidence": 0.9,
+                    "reason": "players_chatting_with_each_other",
+                    "target_player": "alice",
+                    "topic": "village location",
+                }, ensure_ascii=False), {}),
+                ("\u6751\u5e84\u5927\u6982\u5728\u4f60\u73b0\u5728\u7684\u897f\u5317\u65b9\u3002", {"reply": "\u6751\u5e84\u5927\u6982\u5728\u4f60\u73b0\u5728\u7684\u897f\u5317\u65b9\u3002"}),
+            ])
+            bridge.invoker = invoker
+            bridge.delivery = StubDelivery()
+
+            message = "\u5c0f\u5e7b \u6751\u5e84\u5730\u5740\u662f\u591a\u5c11\uff1f"
+            bridge.handle_event({"type": "chat", "player": "alice", "message": message, "raw": f"<alice> {message}"})
+
+            self.assertEqual(
+                invoker.calls[1]["payload"]["decision"]["reason"],
+                "direct_question_to_bot",
+            )
+
+    def test_handle_event_does_not_turn_normal_chinese_followup_into_memory_refusal(self):
+        config = self.make_config()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = self.make_state(tmpdir)
+            bridge = MCAIBridge(config=config, state=state)
+            invoker = CapturingInvoker([
+                (json.dumps({
+                    "should_reply": False,
+                    "confidence": 0.9,
+                    "reason": "players_chatting_with_each_other",
+                    "target_player": "alice",
+                    "topic": "normal follow-up",
+                }, ensure_ascii=False), {}),
+                ("\u90a3\u5c31\u5148\u6309\u4f60\u521a\u624d\u5b9a\u7684\u65b9\u5411\u7ee7\u7eed\u3002", {"reply": "\u90a3\u5c31\u5148\u6309\u4f60\u521a\u624d\u5b9a\u7684\u65b9\u5411\u7ee7\u7eed\u3002"}),
+            ])
+            bridge.invoker = invoker
+            bridge.delivery = StubDelivery()
+
+            message = "\u5c0f\u5e7b \u6309\u6211\u4e4b\u524d\u8bf4\u7684\u6765"
+            bridge.handle_event({"type": "chat", "player": "alice", "message": message, "raw": f"<alice> {message}"})
+
+            self.assertEqual(
+                invoker.calls[1]["payload"]["decision"]["reason"],
+                "direct_address_to_bot",
+            )
 
     def test_handle_event_does_not_override_player_to_player_request_without_bot_signal(self):
         config = self.make_config()
@@ -812,7 +1080,7 @@ class BridgeTests(unittest.TestCase):
             ])
             bridge.delivery = StubDelivery()
 
-            bridge.handle_event({"type": "chat", "player": "alice", "message": "still there?", "raw": "<alice> still there?"})
+            bridge.handle_event({"type": "chat", "player": "alice", "message": "huan still there?", "raw": "<alice> huan still there?"})
 
             self.assertEqual(state.data["botConsecutiveReplyCount"], 1)
             self.assertEqual(bridge.delivery.sent, ["Yep, I am here."])
