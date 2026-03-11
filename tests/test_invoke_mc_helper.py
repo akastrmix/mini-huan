@@ -64,7 +64,8 @@ class InvokeMCHelperTests(unittest.TestCase):
                         invoke_mc_helper.main()
 
             self.assertEqual(observed["cwd"], str(helper_workspace))
-            self.assertEqual(observed["cmd"][0], invoke_mc_helper.OPENCLAW_CMD)
+            self.assertEqual(observed["cmd"][0], invoke_mc_helper.OPENCLAW_NODE)
+            self.assertEqual(observed["cmd"][1], str(invoke_mc_helper.OPENCLAW_MJS))
             self.assertTrue(debug_path.exists())
             self.assertEqual(
                 json.loads(out_path.read_text(encoding="utf-8")),

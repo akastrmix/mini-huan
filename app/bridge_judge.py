@@ -21,6 +21,7 @@ from bridge_shared import (
     PRIVATE_REQUEST_MARKERS,
     PRIVATE_REQUEST_MARKERS_ZH,
     PROACTIVE_DIRECT_OVERRIDE_BLOCK_REASONS,
+    QUESTION_HINTS_ZH,
     QUESTION_START_RE,
     SEVERE_THREAT_MARKERS,
     SOFT_PASS_REASONS,
@@ -92,9 +93,11 @@ class JudgePipeline:
         return (ref_now - last_player_reply_ts) <= window_seconds
 
     def has_direct_request_shape_for_override(self, message: str):
-        return self.has_direct_request_shape(message) or any(
-            hint in (message or "")
-            for hint in DIRECT_REQUEST_HINTS_ZH
+        raw_text = message or ""
+        return (
+            self.has_direct_request_shape(message)
+            or any(hint in raw_text for hint in DIRECT_REQUEST_HINTS_ZH)
+            or any(hint in raw_text for hint in QUESTION_HINTS_ZH)
         )
 
     def recent_same_player_bot_exchange(self, player: str, *, now: float | None = None, min_window: float = 0.0):

@@ -39,12 +39,45 @@ class CapturingInvoker(StubInvoker):
 
 
 class PrivilegedInvoker:
-    def __init__(self, *, router_response: dict, privileged_response: dict, reply_text: str | None = None):
+    def __init__(
+        self,
+        *,
+        router_response: dict,
+        privileged_response: dict | None = None,
+        privileged_responses: list[dict] | None = None,
+        reply_text: str | None = None,
+        session_ids: list[str] | None = None,
+    ):
         self.calls = []
         self.router_response = json.dumps(router_response, ensure_ascii=False)
-        self.privileged_response = json.dumps(privileged_response, ensure_ascii=False)
+        response_items = list(privileged_responses or ([] if privileged_response is None else [privileged_response]))
+        if not response_items:
+            response_items = [{
+                "status": "completed",
+                "commands": [],
+                "reply": "",
+                "topic": "",
+                "reason": "",
+            }]
+        if (
+            privileged_responses is None
+            and privileged_response is not None
+            and len(response_items) == 1
+            and str((response_items[0] or {}).get("status") or "").strip().lower() == "completed"
+            and list((response_items[0] or {}).get("commands") or [])
+        ):
+            response_items.append({
+                "status": "completed",
+                "commands": [],
+                "reply": str((response_items[0] or {}).get("reply") or ""),
+                "topic": str((response_items[0] or {}).get("topic") or ""),
+                "reason": str((response_items[0] or {}).get("reason") or ""),
+            })
+        self.privileged_responses = [json.dumps(item, ensure_ascii=False) for item in response_items]
         self.reply_text = reply_text
         self.prompt_calls = 0
+        self.session_ids = list(session_ids or ["priv-session-123"])
+        self.last_session_id = self.session_ids[-1] if self.session_ids else "priv-session-123"
 
     def call_prompt(self, payload, prompt_path):
         self.calls.append({"kind": "prompt", "payload": payload, "prompt_path": prompt_path})
@@ -64,20 +97,26 @@ class PrivilegedInvoker:
             "prompt_path": prompt_path,
             "session_id": session_id,
         })
-        return self.privileged_response, {"reply": self.privileged_response, "sessionId": "priv-session-123"}
+        if not self.privileged_responses:
+            raise AssertionError("No stub responses left for call_prompt_session")
+        response_text = self.privileged_responses.pop(0)
+        if self.session_ids:
+            self.last_session_id = self.session_ids.pop(0)
+        return response_text, {"reply": response_text, "sessionId": self.last_session_id}
 
 
 class RouterErrorInvoker:
     def __init__(self, *, reply_text: str, privileged_response: dict | None = None):
         self.calls = []
         self.reply_text = reply_text
-        self.privileged_response = json.dumps(privileged_response or {
+        self.privileged_response_data = privileged_response or {
             "status": "completed",
             "commands": [],
             "reply": "",
             "topic": "",
             "reason": "",
-        }, ensure_ascii=False)
+        }
+        self.session_calls = 0
 
     def call_prompt(self, payload, prompt_path):
         self.calls.append({"payload": payload, "prompt_path": prompt_path})
@@ -96,7 +135,19 @@ class RouterErrorInvoker:
 
     def call_prompt_session(self, payload, prompt_path, *, session_id=""):
         self.calls.append({"payload": payload, "prompt_path": prompt_path, "session_id": session_id})
-        return self.privileged_response, {"reply": self.privileged_response, "sessionId": "local-fallback-session"}
+        self.session_calls += 1
+        if self.session_calls == 1:
+            response = self.privileged_response_data
+        else:
+            response = {
+                "status": "completed",
+                "commands": [],
+                "reply": str((self.privileged_response_data or {}).get("reply") or ""),
+                "topic": str((self.privileged_response_data or {}).get("topic") or ""),
+                "reason": str((self.privileged_response_data or {}).get("reason") or ""),
+            }
+        response_text = json.dumps(response, ensure_ascii=False)
+        return response_text, {"reply": response_text, "sessionId": "local-fallback-session"}
 
 
 class PrivilegedStageErrorInvoker:
@@ -126,10 +177,11 @@ class StubDelivery:
 
 
 class PrivilegedDelivery(StubDelivery):
-    def __init__(self, error=None):
+    def __init__(self, error=None, command_results=None):
         super().__init__(error=error)
         self.private_sent = []
         self.commands = []
+        self.command_results = dict(command_results or {})
 
     def send_private_reply(self, player: str, reply: str):
         if self.error is not None:
@@ -141,6 +193,13 @@ class PrivilegedDelivery(StubDelivery):
         if self.error is not None:
             raise self.error
         self.commands.append(command_text)
+        configured = self.command_results.get(command_text)
+        if isinstance(configured, Exception):
+            raise configured
+        if isinstance(configured, dict):
+            return {"sent": True, "command": command_text, **configured}
+        if configured is not None:
+            return {"sent": True, "stdout": str(configured), "command": command_text}
         return {"sent": True, "stdout": "ok", "command": command_text}
 
 
@@ -1029,6 +1088,70 @@ class BridgeTests(unittest.TestCase):
             self.assertEqual(bridge.delivery.sent, ["算是服务器这边把我搭起来的聊天助手。"])
             self.assertEqual(state.data["botConsecutiveReplyCount"], 1)
 
+    def test_handle_event_uses_active_session_context_for_chinese_followup_without_renaming_bot(self):
+        config = self.make_config()
+        config["followupReplyWindowSeconds"] = 180
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = self.make_state(tmpdir)
+            now = time.time()
+            state.data["lastGlobalReplyTs"] = now - 12
+            state.data["lastPlayerReplyTs"] = {"alice": now - 12}
+            state.data["recentBotReplies"] = [
+                {"text": "现在在线 1 人，就你一个。", "timestamp": now - 12},
+            ]
+            state.data["recentChat"] = [
+                {"speaker": "mini-huan", "text": "现在在线 1 人，就你一个。", "timestamp": now - 12, "type": "bot"},
+            ]
+            state.activate_player_session(
+                "alice",
+                "assist",
+                session_id="assist-session",
+                topic="online player count",
+                last_request_text="huan 告诉我服务器目前有多少人",
+                last_commands=["list"],
+                last_command_results=[{
+                    "command": "list",
+                    "ok": True,
+                    "stdout": "OK: There are 1 of a max of 2026 players online: alice",
+                    "error": "",
+                    "stdout_truncated": False,
+                }],
+                last_reply_text="现在在线 1 人，就你一个。",
+                timestamp=now - 12,
+            )
+            bridge = MCAIBridge(config=config, state=state)
+            invoker = CapturingInvoker([
+                (json.dumps({
+                    "mode": "chat",
+                    "requested_mode": "chat",
+                    "denied_by_permission": False,
+                    "confidence": 0.2,
+                    "enter_or_continue": "none",
+                    "private_requested": False,
+                    "topic": "used command explanation",
+                    "reason": "not_addressed_to_bot",
+                }, ensure_ascii=False), {}),
+                (json.dumps({
+                    "should_reply": False,
+                    "confidence": 0.2,
+                    "reason": "not_addressed_to_bot",
+                    "target_player": "alice",
+                    "topic": "used command explanation",
+                }, ensure_ascii=False), {}),
+                ("我刚才用了 list 命令。", {"reply": "我刚才用了 list 命令。"}),
+            ])
+            bridge.invoker = invoker
+            bridge.delivery = StubDelivery()
+
+            message = "你用了什么命令做到的"
+            bridge.handle_event({"type": "chat", "player": "alice", "message": message, "raw": f"<alice> {message}"})
+
+            self.assertEqual(bridge.delivery.sent, ["我刚才用了 list 命令。"])
+            self.assertEqual(invoker.calls[2]["payload"]["decision"]["reason"], "followup_to_bot_conversation")
+            self.assertEqual(invoker.calls[2]["payload"]["active_session"]["last_commands"], ["list"])
+            self.assertIn("There are 1", invoker.calls[2]["payload"]["active_session"]["last_command_results"][0]["stdout"])
+
     def test_handle_event_does_not_turn_normal_chinese_address_question_into_privacy_refusal(self):
         config = self.make_config()
 
@@ -1354,6 +1477,141 @@ class BridgeTests(unittest.TestCase):
             self.assertEqual(session["mode"], "assist")
             self.assertEqual(session["sessionId"], "priv-session-123")
             self.assertEqual(session["topic"], "return to spawn")
+            self.assertEqual(session["lastCommandResults"][0]["command"], "kill alice")
+            self.assertTrue(session["lastCommandResults"][0]["ok"])
+
+    def test_privileged_assist_multistep_query_replays_command_results_back_to_helper(self):
+        config = self.make_config()
+        config["auth"]["players"] = {"alice": ["assist"]}
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = self.make_state(tmpdir)
+            bridge = MCAIBridge(config=config, state=state)
+            bridge.invoker = PrivilegedInvoker(
+                router_response={
+                    "mode": "assist",
+                    "requested_mode": "assist",
+                    "denied_by_permission": False,
+                    "confidence": 0.94,
+                    "enter_or_continue": "enter",
+                    "private_requested": False,
+                    "topic": "current player count",
+                    "reason": "live server query",
+                },
+                privileged_responses=[
+                    {
+                        "status": "run_commands",
+                        "commands": ["list"],
+                        "reply": "",
+                        "topic": "current player count",
+                        "reason": "need live player count",
+                    },
+                    {
+                        "status": "completed",
+                        "commands": [],
+                        "reply": "现在有 2 个玩家在线：alice, bob。",
+                        "topic": "current player count",
+                        "reason": "summarized live command result",
+                    },
+                ],
+                session_ids=["priv-session-xyz", "priv-session-xyz"],
+            )
+            bridge.delivery = PrivilegedDelivery(
+                command_results={"list": "There are 2/20 players online: alice, bob"}
+            )
+
+            bridge.handle_event(
+                {
+                    "type": "chat",
+                    "player": "alice",
+                    "message": "小幻 现在在线有几个人",
+                    "raw": "<alice> 小幻 现在在线有几个人",
+                }
+            )
+
+            self.assertEqual(bridge.delivery.commands, ["list"])
+            self.assertEqual(bridge.delivery.sent, ["现在有 2 个玩家在线：alice, bob。"])
+            session_calls = [call for call in bridge.invoker.calls if call["kind"] == "session"]
+            self.assertEqual(len(session_calls), 2)
+            self.assertEqual(session_calls[1]["payload"]["protocol"]["phase"], "after_command_results")
+            self.assertEqual(
+                session_calls[1]["payload"]["protocol"]["last_command_results"][0]["command"],
+                "list",
+            )
+            self.assertIn(
+                "alice, bob",
+                session_calls[1]["payload"]["protocol"]["last_command_results"][0]["stdout"],
+            )
+            self.assertEqual(
+                session_calls[1]["payload"]["protocol"]["command_history"][0]["executed_commands"],
+                ["list"],
+            )
+            session = state.data["playerSessions"]["alice"]
+            self.assertEqual(session["sessionId"], "priv-session-xyz")
+            self.assertEqual(session["lastCommandResults"][0]["command"], "list")
+            self.assertIn("alice, bob", session["lastCommandResults"][0]["stdout"])
+
+    def test_privileged_assist_completed_command_gets_confirmation_round_before_final_reply(self):
+        config = self.make_config()
+        config["auth"]["players"] = {"alice": ["assist"]}
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = self.make_state(tmpdir)
+            bridge = MCAIBridge(config=config, state=state)
+            bridge.invoker = PrivilegedInvoker(
+                router_response={
+                    "mode": "assist",
+                    "requested_mode": "assist",
+                    "denied_by_permission": False,
+                    "confidence": 0.95,
+                    "enter_or_continue": "enter",
+                    "private_requested": False,
+                    "topic": "clear nearby creepers",
+                    "reason": "nearby mob cleanup",
+                },
+                privileged_responses=[
+                    {
+                        "status": "completed",
+                        "commands": ["kill @e[type=minecraft:creeper,distance=..16]"],
+                        "reply": "帮你清掉附近的苦力怕了。",
+                        "topic": "clear nearby creepers",
+                        "reason": "one-step cleanup",
+                    },
+                    {
+                        "status": "completed",
+                        "commands": [],
+                        "reply": "这次没找到你附近的苦力怕。",
+                        "topic": "clear nearby creepers",
+                        "reason": "selector matched nothing",
+                    },
+                ],
+            )
+            bridge.delivery = PrivilegedDelivery(
+                command_results={
+                    "kill @e[type=minecraft:creeper,distance=..16]": "OK: No entity was found"
+                }
+            )
+
+            bridge.handle_event(
+                {
+                    "type": "chat",
+                    "player": "alice",
+                    "message": "小幻 帮我清理掉我附近的苦力怕",
+                    "raw": "<alice> 小幻 帮我清理掉我附近的苦力怕",
+                }
+            )
+
+            session_calls = [call for call in bridge.invoker.calls if call["kind"] == "session"]
+            self.assertEqual(len(session_calls), 2)
+            self.assertEqual(session_calls[1]["payload"]["protocol"]["phase"], "after_command_results")
+            self.assertEqual(
+                session_calls[1]["payload"]["protocol"]["last_command_results"][0]["stdout"],
+                "OK: No entity was found",
+            )
+            self.assertEqual(bridge.delivery.commands, ["kill @e[type=minecraft:creeper,distance=..16]"])
+            self.assertEqual(bridge.delivery.sent, ["这次没找到你附近的苦力怕。"])
+            session = state.data["playerSessions"]["alice"]
+            self.assertEqual(session["lastCommandResults"][0]["stdout"], "OK: No entity was found")
 
     def test_privileged_route_can_reply_privately_when_requested(self):
         config = self.make_config()
@@ -1592,6 +1850,9 @@ class BridgeTests(unittest.TestCase):
             self.assertEqual(config["botStyle"]["persona"], "Minecraft public-chat helper")
             self.assertEqual(config["routerConfidenceThreshold"], 0.55)
             self.assertEqual(config["modeSessionWindowSeconds"]["full_agent"], 900)
+            self.assertEqual(config["privilegedCommandMaxRounds"], 3)
+            self.assertEqual(config["privilegedCommandMaxCommandsPerRound"], 3)
+            self.assertEqual(config["privilegedCommandResultMaxChars"], 400)
             self.assertEqual(config["auth"]["groups"]["owner"]["max_mode"], "full_agent")
 
 

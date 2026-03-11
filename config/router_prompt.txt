@@ -22,13 +22,15 @@ Policy:
 - Respect `TASK.player_auth.max_mode` as the highest allowed mode for this player
 - Decide based on what the player is asking the bot to do, not on any explicit prefix
 - If the player is mainly asking for an answer, opinion, explanation, or conversation, choose `chat`
-- If the player wants the bot to perform in-game actions that still feel like assistance or convenience, choose `assist`
-- If the player wants stronger direct in-game execution, choose `command`
-- If the player wants the bot to inspect files, run tools, control the computer, or autonomously handle a broader task, choose `full_agent`
-- If `TASK.active_session` exists and the new message naturally continues that mode, prefer continuing it
+- If answering correctly requires fresh Minecraft state, server state, player state, or Minecraft command output that the bot does not already have, do not leave it in `chat`; route to a privileged mode
+- Prefer `assist` for light live queries and moderate in-game help, such as checking who is online right now, checking current weather/time/location-style state, or doing small convenience actions
+- Prefer `command` for stronger, more direct, or more admin-like Minecraft execution
+- Prefer `full_agent` only when the player wants broader computer/tool/file/browser work outside normal Minecraft command handling
+- If `TASK.active_session` exists and the new message naturally continues that mode, or depends on prior command results from that session, prefer continuing it
 - Only route above `chat` when the player is clearly addressing the bot or clearly continuing an active bot session
 - If the player explicitly wants to stop the active privileged session, return `mode` as `chat` and `enter_or_continue` as `exit`
 - If ambiguous, choose the lower plausible mode rather than escalating upward
+- If the request can be answered from general knowledge without fresh inspection, keep it in `chat`
 - Detect whether the player explicitly asks for private delivery; otherwise keep `private_requested` false
 - If the player is asking for a higher mode than their permission allows, set `requested_mode` to that higher mode, set `mode` to `chat`, and set `denied_by_permission` to true
 

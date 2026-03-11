@@ -114,6 +114,7 @@ Minecraft latest.log
   -> app/mc_log_listener.py parses log lines
   -> app/mc_ai_bridge.py records short-term context
   -> app/mc_ai_bridge.py optionally routes privileged players into assist/command/full_agent
+  -> assist/command can now loop: helper plans commands -> bridge executes -> helper reads command results -> helper decides next step
   -> normal chat still uses judge via mc-helper
   -> if approved, app/mc_ai_bridge.py calls reply via mc-helper
   -> privileged modes can execute RCON commands and/or send a reply
@@ -218,6 +219,9 @@ Notes:
 - Sessions are tracked per player, not globally
 - The bridge launches helper calls from `helperWorkspacePath`, but OpenClaw can still resume a previously stored session; if the resolved workspace or injected skills look wrong, inspect `runtime/last_invoke_debug.txt`
 - Public reply remains the default; private reply only happens when the player explicitly asks for it
+- The router prompt is now responsible for detecting live Minecraft state queries that require command output; those should prefer `assist` or `command` instead of `chat`
+- `assist` and `command` now support a bridge-managed multi-step command loop, so the helper can probe live state, inspect real stdout, and then continue or summarize
+- Same-player follow-up questions right after a privileged result can now reuse the stored privileged session context even when the player does not repeat the bot's name
 
 ## Helper-local Planner
 
@@ -243,10 +247,12 @@ Current generic execution skill kept separate:
 
 Behavior notes:
 - The helper-local planner is planner-first; the bridge still owns actual RCON delivery
-- `commandPlannerScriptPath` currently powers the local privileged execution fallback path; it is not yet the main router's source of truth for all command/query detection
+- `commandPlannerScriptPath` currently powers the local privileged execution fallback path; the main privileged path now prefers helper-driven routing plus the multi-step command protocol
 - The bridge-local router fallback still contains keyword-based heuristics for `assist`, `command`, and `full_agent`, so command/query intent is not fully delegated to the helper side yet
 - Follow-up shorthand like `again`, `one more`, or `再来一组` is resolved using per-player last successful privileged execution context
-- If the privileged helper route errors, the bridge can fall back to the helper-local planner script
+- If the privileged helper route errors, the bridge can still fall back to the helper-local planner script
+- In the main helper path, the bridge now returns actual command stdout/error results back to the helper between `assist`/`command` steps
+- In the main helper path, one-shot `assist`/`command` actions with commands are confirmed through a result round before the final player-facing reply, so the helper can react to `No entity was found`-style outcomes instead of blindly claiming success
 
 Sync checklist when planner behavior changes:
 - Update [bridge_config.json](/C:/Users/Administrator/.openclaw/workspace-mc-bridge/config/bridge_config.json) if the planner script path changes

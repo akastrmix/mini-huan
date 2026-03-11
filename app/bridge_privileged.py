@@ -17,7 +17,7 @@ from bridge_shared import (
 )
 
 ALLOWED_ROUTER_ACTIONS = {"none", "enter", "continue", "exit"}
-ALLOWED_EXECUTION_STATUSES = {"completed", "denied", "needs_clarification", "failed"}
+ALLOWED_EXECUTION_STATUSES = {"run_commands", "completed", "denied", "needs_clarification", "failed"}
 CAPABILITY_TO_MODE = {
     "chat": MODE_CHAT,
     "light_assist": MODE_ASSIST,
@@ -553,6 +553,7 @@ def local_privileged_execution_fallback(event: dict, route: dict, player_auth: d
         "last_execution": {
             "request_text": str((active_session or {}).get("last_request_text") or ""),
             "commands": list((active_session or {}).get("last_commands") or []),
+            "command_results": list((active_session or {}).get("last_command_results") or []),
             "reply_text": str((active_session or {}).get("last_reply_text") or ""),
             "topic": str((active_session or {}).get("topic") or ""),
         },

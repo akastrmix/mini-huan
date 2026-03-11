@@ -16,6 +16,9 @@ from bridge_components import (
     DEFAULT_FULL_AGENT_PROMPT,
     DEFAULT_JUDGE_PROMPT,
     DEFAULT_MAX_MESSAGE_CHARS,
+    DEFAULT_PRIVILEGED_COMMAND_MAX_COMMANDS_PER_ROUND,
+    DEFAULT_PRIVILEGED_COMMAND_MAX_ROUNDS,
+    DEFAULT_PRIVILEGED_COMMAND_RESULT_MAX_CHARS,
     DEFAULT_REPLY_PROMPT,
     DEFAULT_ROUTER_PROMPT,
     DEFAULT_STATE_PATH,
@@ -163,8 +166,8 @@ class MCAIBridge:
         self.logger.emit({"bridge": "router", "event": event, "route": route})
         return route, "ok"
 
-    def run_judge_stage(self, event: dict):
-        judge_context = self.context.build_judge_context(event)
+    def run_judge_stage(self, event: dict, active_session: dict | None = None):
+        judge_context = self.context.build_judge_context(event, active_session)
         if self.logger.input_logs_enabled():
             self.logger.emit({"bridge": "judge_input", "event": event, "context": judge_context})
         try:
@@ -186,8 +189,8 @@ class MCAIBridge:
             return decision, None, gate_reason
         return decision, judge_context, "passed"
 
-    def run_reply_stage(self, event: dict, decision: dict):
-        reply_context = self.context.build_reply_context(event, decision)
+    def run_reply_stage(self, event: dict, decision: dict, active_session: dict | None = None):
+        reply_context = self.context.build_reply_context(event, decision, active_session)
         if self.logger.input_logs_enabled():
             self.logger.emit({"bridge": "reply_input", "event": event, "decision": decision, "context": reply_context})
         try:
@@ -262,6 +265,145 @@ class MCAIBridge:
             return str(self.config.get("commandPromptPath", DEFAULT_COMMAND_PROMPT))
         return str(self.config.get("fullAgentPromptPath", DEFAULT_FULL_AGENT_PROMPT))
 
+    def privileged_command_max_rounds(self):
+        return max(
+            1,
+            int(self.config.get("privilegedCommandMaxRounds", DEFAULT_PRIVILEGED_COMMAND_MAX_ROUNDS)),
+        )
+
+    def privileged_command_max_commands_per_round(self):
+        return max(
+            1,
+            int(
+                self.config.get(
+                    "privilegedCommandMaxCommandsPerRound",
+                    DEFAULT_PRIVILEGED_COMMAND_MAX_COMMANDS_PER_ROUND,
+                )
+            ),
+        )
+
+    def privileged_command_result_max_chars(self):
+        return max(
+            80,
+            int(
+                self.config.get(
+                    "privilegedCommandResultMaxChars",
+                    DEFAULT_PRIVILEGED_COMMAND_RESULT_MAX_CHARS,
+                )
+            ),
+        )
+
+    def normalize_command_result_text(self, value):
+        text = str(value or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+        if not text:
+            return "", False
+        limit = self.privileged_command_result_max_chars()
+        if len(text) <= limit:
+            return text, False
+        clipped = text[:limit].rstrip()
+        if len(clipped) < len(text):
+            clipped = (clipped + "...").rstrip()
+        return clipped, True
+
+    def default_privileged_protocol_state(self):
+        return {
+            "version": 1,
+            "phase": "initial_request",
+            "command_round": 0,
+            "max_command_rounds": self.privileged_command_max_rounds(),
+            "last_command_results": [],
+            "command_history": [],
+        }
+
+    def execute_command_batch(self, event: dict, route: dict, commands: list[str], *, round_index: int):
+        requested_commands = [str(command or "").strip() for command in list(commands or []) if str(command or "").strip()]
+        max_commands = self.privileged_command_max_commands_per_round()
+        executed_commands = requested_commands[:max_commands]
+        skipped_commands = requested_commands[max_commands:]
+        results = []
+
+        for command in executed_commands:
+            try:
+                send_result = self.delivery.send_command(command)
+            except Exception as exc:
+                error_text, error_truncated = self.normalize_command_result_text(str(exc))
+                self.logger.emit(
+                    {
+                        "bridge": "error",
+                        "stage": "command_delivery",
+                        "error": error_text or str(exc),
+                        "error_truncated": error_truncated,
+                        "event": event,
+                        "route": route,
+                        "command": command,
+                        "round": round_index,
+                    }
+                )
+                results.append(
+                    {
+                        "command": command,
+                        "ok": False,
+                        "stdout": "",
+                        "error": error_text or str(exc),
+                        "stdout_truncated": False,
+                    }
+                )
+                continue
+
+            if not bool((send_result or {}).get("sent", True)):
+                reason_text, reason_truncated = self.normalize_command_result_text(
+                    (send_result or {}).get("reason") or "command was not sent"
+                )
+                results.append(
+                    {
+                        "command": command,
+                        "ok": False,
+                        "stdout": "",
+                        "error": reason_text or "command was not sent",
+                        "stdout_truncated": reason_truncated,
+                    }
+                )
+                continue
+
+            stdout_text, stdout_truncated = self.normalize_command_result_text((send_result or {}).get("stdout") or "")
+            results.append(
+                {
+                    "command": command,
+                    "ok": True,
+                    "stdout": stdout_text,
+                    "error": "",
+                    "stdout_truncated": stdout_truncated,
+                }
+            )
+
+        for command in skipped_commands:
+            results.append(
+                {
+                    "command": command,
+                    "ok": False,
+                    "stdout": "",
+                    "error": f"bridge skipped this command because the per-round limit is {max_commands}",
+                    "stdout_truncated": False,
+                }
+            )
+
+        batch = {
+            "round": round_index,
+            "requested_commands": requested_commands,
+            "executed_commands": executed_commands,
+            "skipped_commands": skipped_commands,
+            "results": results,
+        }
+        self.logger.emit(
+            {
+                "bridge": "privileged_command_batch",
+                "event": event,
+                "route": route,
+                "batch": batch,
+            }
+        )
+        return batch
+
     def finalize_outbound_reply(
         self,
         *,
@@ -316,28 +458,43 @@ class MCAIBridge:
         self.emit_summary(event, "reply", decision, "sent")
         return True
 
-    def handle_permission_denied(self, event: dict, route: dict):
+    def handle_permission_denied(self, event: dict, route: dict, active_session: dict | None = None):
         decision = self.permission_denied_decision(event, route)
-        reply, _raw, reply_status = self.run_reply_stage(event, decision)
+        reply, _raw, reply_status = self.run_reply_stage(event, decision, active_session)
         if reply_status != "ok":
             return False
         return self.finalize_reply(event, decision, reply)
 
-    def run_privileged_stage(self, event: dict, player_auth: dict, route: dict, active_session: dict | None):
+    def run_privileged_stage(
+        self,
+        event: dict,
+        player_auth: dict,
+        route: dict,
+        active_session: dict | None,
+        *,
+        protocol_state: dict | None = None,
+        session_id: str = "",
+    ):
         mode = str(route.get("mode") or "")
-        privileged_context = self.context.build_privileged_context(event, player_auth, route, active_session)
+        privileged_context = self.context.build_privileged_context(
+            event,
+            player_auth,
+            route,
+            active_session,
+            protocol_state=protocol_state,
+        )
         if self.logger.input_logs_enabled():
             self.logger.emit({"bridge": f"{mode}_input", "event": event, "context": privileged_context})
 
-        session_id = ""
-        if active_session and str(active_session.get("mode") or "") == mode:
-            session_id = str(active_session.get("session_id") or "")
+        resolved_session_id = str(session_id or "")
+        if not resolved_session_id and active_session and str(active_session.get("mode") or "") == mode:
+            resolved_session_id = str(active_session.get("session_id") or "")
 
         try:
             raw_text, raw_result = self.invoker.call_prompt_session(
                 privileged_context,
                 self.prompt_path_for_mode(mode),
-                session_id=session_id,
+                session_id=resolved_session_id,
             )
         except Exception as exc:
             self.logger.emit({"bridge": "error", "stage": mode, "error": str(exc), "event": event})
@@ -350,24 +507,125 @@ class MCAIBridge:
         self.logger.emit({"bridge": mode, "event": event, "route": route, "result": execution})
         return execution, raw_result, "ok"
 
-    def finalize_privileged_result(self, event: dict, route: dict, execution: dict, raw_result: dict | None, active_session: dict | None):
+    def run_privileged_turn(self, event: dict, player_auth: dict, route: dict, active_session: dict | None):
+        mode = str(route.get("mode") or "")
+        protocol_state = self.default_privileged_protocol_state()
+        command_history = []
+        session_id = ""
+        if active_session and str(active_session.get("mode") or "") == mode:
+            session_id = str(active_session.get("session_id") or "")
+
+        while True:
+            execution, raw_result, privileged_status = self.run_privileged_stage(
+                event,
+                player_auth,
+                route,
+                active_session,
+                protocol_state=protocol_state,
+                session_id=session_id,
+            )
+            if privileged_status != "ok" or execution is None:
+                return None, raw_result, command_history, privileged_status
+
+            session_id = str((raw_result or {}).get("sessionId") or session_id)
+            if raw_result is not None:
+                raw_result = {**dict(raw_result or {}), "sessionId": session_id}
+
+            status = str(execution.get("status") or "")
+            commands = list(execution.get("commands") or [])
+            should_loop_after_commands = status == "run_commands" or (
+                mode in {"assist", "command"} and status == "completed" and bool(commands)
+            )
+            if should_loop_after_commands:
+                if not commands:
+                    return {
+                        **execution,
+                        "status": "failed",
+                        "commands": [],
+                        "reply": "",
+                        "reason": str(execution.get("reason") or "command loop returned no commands"),
+                    }, raw_result, command_history, "ok"
+                if len(command_history) >= self.privileged_command_max_rounds():
+                    self.logger.emit(
+                        {
+                            "bridge": "privileged_protocol_limit",
+                            "event": event,
+                            "route": route,
+                            "result": execution,
+                            "used_rounds": len(command_history),
+                            "max_rounds": self.privileged_command_max_rounds(),
+                        }
+                    )
+                    return {
+                        "status": "failed",
+                        "commands": [],
+                        "reply": "",
+                        "topic": str(execution.get("topic") or route.get("topic") or ""),
+                        "reason": f"privileged command round limit reached ({self.privileged_command_max_rounds()})",
+                        "mode": mode,
+                    }, raw_result, command_history, "ok"
+
+                batch = self.execute_command_batch(
+                    event,
+                    route,
+                    commands,
+                    round_index=len(command_history) + 1,
+                )
+                command_history.append(batch)
+                protocol_state = {
+                    "version": 1,
+                    "phase": "after_command_results",
+                    "command_round": len(command_history),
+                    "max_command_rounds": self.privileged_command_max_rounds(),
+                    "last_command_results": list(batch.get("results") or []),
+                    "command_history": list(command_history),
+                }
+                continue
+
+            if status == "completed" and execution.get("commands"):
+                batch = self.execute_command_batch(
+                    event,
+                    route,
+                    list(execution.get("commands") or []),
+                    round_index=len(command_history) + 1,
+                )
+                command_history.append(batch)
+                execution = {
+                    **execution,
+                    "_commands_already_executed": True,
+                    "_final_command_results": list(batch.get("results") or []),
+                }
+            return execution, raw_result, command_history, "ok"
+
+    def finalize_privileged_result(
+        self,
+        event: dict,
+        route: dict,
+        execution: dict,
+        raw_result: dict | None,
+        active_session: dict | None,
+        *,
+        command_history: list[dict] | None = None,
+    ):
+        command_history = list(command_history or [])
         commands = list(execution.get("commands") or [])
-        for command in commands:
-            try:
-                self.delivery.send_command(command)
-            except Exception as exc:
-                self.logger.emit({
-                    "bridge": "error",
-                    "stage": "command_delivery",
-                    "error": str(exc),
-                    "event": event,
-                    "route": route,
-                    "command": command,
-                })
-                return False
+        last_command_results = list(execution.get("_final_command_results") or [])
+        if commands and not execution.get("_commands_already_executed"):
+            batch = self.execute_command_batch(
+                event,
+                route,
+                commands,
+                round_index=len(command_history) + 1,
+            )
+            command_history.append(batch)
+            last_command_results = list(batch.get("results") or [])
+        elif not last_command_results and command_history:
+            last_command_results = list((command_history[-1] or {}).get("results") or [])
 
         session_topic = str(execution.get("topic") or route.get("topic") or "")
         reply = str(execution.get("reply") or "").strip()
+        if commands and last_command_results and any(not bool(item.get("ok", False)) for item in last_command_results):
+            reply = ""
         if not reply:
             if execution.get("status") == "completed" and commands:
                 reply = self.fallback_text(
@@ -396,6 +654,9 @@ class MCAIBridge:
 
         should_keep_session = execution.get("status") in {"completed", "denied", "needs_clarification"}
         if should_keep_session:
+            session_commands = commands
+            if not session_commands and command_history:
+                session_commands = list((command_history[-1] or {}).get("executed_commands") or [])
             self.state.activate_player_session(
                 str(event.get("player") or ""),
                 str(route.get("mode") or ""),
@@ -403,7 +664,8 @@ class MCAIBridge:
                 topic=session_topic,
                 private_requested=bool(route.get("private_requested", False) or ((active_session or {}).get("private_requested") and route.get("enter_or_continue") == "continue")),
                 last_request_text=str(event.get("message") or ""),
-                last_commands=commands,
+                last_commands=session_commands,
+                last_command_results=last_command_results,
                 last_reply_text=reply,
                 timestamp=time.time(),
             )
@@ -419,6 +681,7 @@ class MCAIBridge:
                 "event": event,
                 "route": route,
                 "result": execution,
+                "command_history": command_history,
                 "reply": reply,
                 "sessionId": str((raw_result or {}).get("sessionId") or (active_session or {}).get("session_id") or ""),
             },
@@ -460,32 +723,51 @@ class MCAIBridge:
                     self.state.save()
                     active_session = None
                 if route.get("denied_by_permission"):
-                    if not self.handle_permission_denied(event, route):
+                    if not self.handle_permission_denied(event, route, active_session):
                         self.mark_turn_without_reply()
                     return
                 if str(route.get("mode") or "") in PRIVILEGED_MODES:
-                    execution, raw_result, privileged_status = self.run_privileged_stage(event, player_auth, route, active_session)
+                    execution, raw_result, command_history, privileged_status = self.run_privileged_turn(
+                        event,
+                        player_auth,
+                        route,
+                        active_session,
+                    )
                     if privileged_status != "ok" or execution is None:
                         local_execution = None
                         if str(route.get("mode") or "") in {"assist", "command"}:
                             local_execution = local_privileged_execution_fallback(event, route, player_auth, self.config, active_session)
                         if local_execution is not None:
                             self.logger.emit({"bridge": "privileged_local_execution_fallback", "event": event, "route": route, "result": local_execution})
-                            if not self.finalize_privileged_result(event, route, local_execution, {}, active_session):
+                            if not self.finalize_privileged_result(
+                                event,
+                                route,
+                                local_execution,
+                                {},
+                                active_session,
+                                command_history=[],
+                            ):
                                 self.mark_turn_without_reply()
                             return
                         self.logger.emit({"bridge": "privileged_fallback_to_chat", "event": event, "route": route})
                     else:
-                        if not self.finalize_privileged_result(event, route, execution, raw_result, active_session):
+                        if not self.finalize_privileged_result(
+                            event,
+                            route,
+                            execution,
+                            raw_result,
+                            active_session,
+                            command_history=command_history,
+                        ):
                             self.mark_turn_without_reply()
                         return
 
-        decision, _judge_context, judge_status = self.run_judge_stage(event)
+        decision, _judge_context, judge_status = self.run_judge_stage(event, active_session)
         if judge_status != "passed":
             self.mark_turn_without_reply()
             return
 
-        reply, _raw, reply_status = self.run_reply_stage(event, decision)
+        reply, _raw, reply_status = self.run_reply_stage(event, decision, active_session)
         if reply_status != "ok":
             self.mark_turn_without_reply()
             return

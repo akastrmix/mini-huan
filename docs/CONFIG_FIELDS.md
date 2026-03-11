@@ -60,6 +60,12 @@ This file explains the fields in `bridge_config.json` as the bridge works today.
   - Timeout passed to the agent call itself; the bridge also adds a small local buffer around the helper process
 - `routerConfidenceThreshold`
   - Minimum confidence required before a privileged route above `chat` is trusted
+- `privilegedCommandMaxRounds`
+  - Maximum number of bridge-executed command/result loop rounds allowed inside one privileged player turn
+- `privilegedCommandMaxCommandsPerRound`
+  - Maximum number of Minecraft commands the bridge will execute in a single privileged loop round before marking the extras as skipped
+- `privilegedCommandResultMaxChars`
+  - Max characters of command stdout/error that the bridge will send back to the helper in the next privileged loop round
 
 ## Privileged routing / auth
 
@@ -84,6 +90,9 @@ Behavior notes:
 - Privileged routing is only attempted for players whose configured `max_mode` is above `chat`, or who already have an active privileged session
 - Public reply is still the default; private reply only happens when the player explicitly asks for it
 - Privileged sessions are tracked per player, not globally
+- Live Minecraft state questions that require real command output should route through the prompt into `assist` or `command`, not stay in `chat`
+- `assist` and `command` now support a bridge-managed multi-step loop: helper returns commands, bridge executes them, helper receives actual results, then helper decides the next step or final reply
+- Same-player follow-up questions can reuse the stored active privileged session context even when the player does not rename the bot
 - The bridge-local router fallback still contains some keyword-based heuristics for `assist`, `command`, and `full_agent`; routing is not yet fully delegated to helper-side command reasoning
 - Continuation phrases such as `again`, `one more`, or `再来一组` can reuse the player's last successful privileged command context
 
@@ -105,6 +114,7 @@ Pitfalls:
 - If you move the helper-local skill directory without updating `skills.load.extraDirs`, the skill may disappear from the Control UI and runtime skill list
 - If OpenClaw resumes a stored session outside `helperWorkspacePath`, the helper-side skill summary and injected workspace files may not match the bridge's intended helper workspace
 - If you assume `commandPlannerScriptPath` controls all privileged routing decisions, you may miss that the bridge-local router fallback still makes some keyword-based mode choices before helper execution fallback kicks in
+- If you change the multi-step command protocol shape in prompts or code, keep the bridge-side protocol payload and helper expectations in sync
 - Do not duplicate the planner path in multiple prompt or doc files; keep the path authoritative in `bridge_config.json`
 
 ## Message filtering
@@ -175,7 +185,8 @@ Behavior note:
 
 Additional persisted state:
 - `playerSessions`
-  - Per-player active privileged session metadata, including current mode, session id, topic, and private-reply preference
+  - Per-player active privileged session metadata, including current mode, session id, topic, private-reply preference, and the most recent command results
+  - The bridge reuses this state for conversational follow-ups about the last privileged action and for command-result confirmation rounds
 
 ## Debug logging
 

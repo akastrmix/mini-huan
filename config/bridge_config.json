@@ -34,6 +34,9 @@
     "command": 300,
     "full_agent": 900
   },
+  "privilegedCommandMaxRounds": 3,
+  "privilegedCommandMaxCommandsPerRound": 3,
+  "privilegedCommandResultMaxChars": 400,
   "auth": {
     "groups": {
       "default": {

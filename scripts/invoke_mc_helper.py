@@ -8,12 +8,14 @@ Why this exists:
 """
 
 import json
+import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent.parent
-OPENCLAW_CMD = r"C:\Users\Administrator\AppData\Roaming\npm\openclaw.cmd"
+OPENCLAW_NODE = shutil.which("node") or r"C:\Program Files\nodejs\node.exe"
+OPENCLAW_MJS = Path(r"C:\Users\Administrator\AppData\Roaming\npm\node_modules\openclaw\openclaw.mjs")
 DEBUG_PATH = BASE_DIR / "runtime" / "last_invoke_debug.txt"
 PROCESS_TIMEOUT_BUFFER_SECONDS = 15
 
@@ -52,6 +54,7 @@ def write_debug(
     task_payload: dict,
     proc: subprocess.CompletedProcess[str] | None,
     *,
+    command: list[str] | None = None,
     helper_workspace: str = "",
     stderr: str = "",
 ):
@@ -64,6 +67,8 @@ def write_debug(
         + rc
         + "\nPROMPT_PATH=\n"
         + str(prompt_path)
+        + "\n\nCOMMAND=\n"
+        + json.dumps(list(command or []), ensure_ascii=False, indent=2)
         + "\n\nHELPER_WORKSPACE=\n"
         + str(helper_workspace or "")
         + "\n\nTASK=\n"
@@ -86,6 +91,12 @@ def resolve_helper_workspace(config: dict):
     return str(workspace_path)
 
 
+def resolve_openclaw_command():
+    if not OPENCLAW_MJS.exists():
+        raise SystemExit(f"openclaw.mjs not found: {OPENCLAW_MJS}")
+    return [OPENCLAW_NODE, str(OPENCLAW_MJS)]
+
+
 def main():
     if len(sys.argv) not in {7, 8}:
         raise SystemExit(
@@ -104,7 +115,7 @@ def main():
     timeout_seconds_int = max(1, int(timeout_seconds))
 
     cmd = [
-        OPENCLAW_CMD,
+        *resolve_openclaw_command(),
         "agent",
         "--agent",
         agent_id,
@@ -132,12 +143,23 @@ def main():
             prompt_path,
             task_payload,
             None,
+            command=cmd,
             helper_workspace=helper_workspace or "",
             stderr=f"openclaw agent timed out after {timeout_seconds_int + PROCESS_TIMEOUT_BUFFER_SECONDS}s",
         )
         raise SystemExit(f"openclaw agent timed out after {timeout_seconds_int + PROCESS_TIMEOUT_BUFFER_SECONDS}s")
+    except OSError as exc:
+        write_debug(
+            prompt_path,
+            task_payload,
+            None,
+            command=cmd,
+            helper_workspace=helper_workspace or "",
+            stderr=str(exc),
+        )
+        raise SystemExit(f"openclaw agent launch failed: {exc}")
 
-    write_debug(prompt_path, task_payload, proc, helper_workspace=helper_workspace or "")
+    write_debug(prompt_path, task_payload, proc, command=cmd, helper_workspace=helper_workspace or "")
     if proc.returncode != 0:
         raise SystemExit(proc.stderr or proc.stdout or f"openclaw agent failed: {proc.returncode}")
 

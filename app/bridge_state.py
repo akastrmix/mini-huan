@@ -84,6 +84,7 @@ class BridgeState:
         session.setdefault("privateRequested", False)
         session.setdefault("lastRequestText", "")
         session.setdefault("lastCommands", [])
+        session.setdefault("lastCommandResults", [])
         session.setdefault("lastReplyText", "")
         sessions[key] = session
         return session
@@ -102,6 +103,7 @@ class BridgeState:
                 "privateRequested": False,
                 "lastRequestText": "",
                 "lastCommands": [],
+                "lastCommandResults": [],
                 "lastReplyText": "",
             }
 
@@ -129,6 +131,7 @@ class BridgeState:
             "private_requested": bool(session.get("privateRequested", False)),
             "last_request_text": str(session.get("lastRequestText") or ""),
             "last_commands": list(session.get("lastCommands") or []),
+            "last_command_results": list(session.get("lastCommandResults") or []),
             "last_reply_text": str(session.get("lastReplyText") or ""),
         }
 
@@ -142,6 +145,7 @@ class BridgeState:
         private_requested: bool = False,
         last_request_text: str = "",
         last_commands: list[str] | None = None,
+        last_command_results: list[dict] | None = None,
         last_reply_text: str = "",
         timestamp: float | None = None,
     ):
@@ -156,6 +160,17 @@ class BridgeState:
         session["privateRequested"] = bool(private_requested)
         session["lastRequestText"] = str(last_request_text or "")
         session["lastCommands"] = [str(item or "").strip() for item in list(last_commands or []) if str(item or "").strip()]
+        session["lastCommandResults"] = [
+            {
+                "command": str((item or {}).get("command") or "").strip(),
+                "ok": bool((item or {}).get("ok", False)),
+                "stdout": str((item or {}).get("stdout") or ""),
+                "error": str((item or {}).get("error") or ""),
+                "stdout_truncated": bool((item or {}).get("stdout_truncated", False)),
+            }
+            for item in list(last_command_results or [])
+            if str((item or {}).get("command") or "").strip()
+        ]
         session["lastReplyText"] = str(last_reply_text or "")
         session["lastActiveTs"] = float(time.time() if timestamp is None else timestamp)
         self.data.setdefault("playerSessions", {})[key] = session
