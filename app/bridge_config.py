@@ -74,7 +74,7 @@ def default_config():
         "contextMaxAgeSeconds": 900,
         "judgeConfidenceThreshold": 0.72,
         "judgeSoftThreshold": 0.58,
-        "maxBotConsecutiveReplies": 4,
+        "maxBotConsecutiveReplies": 8,
         "followupReplyWindowSeconds": 180,
         "maxSamePlayerConversationReplies": 20,
         "botReplyStreakResetSeconds": 180,

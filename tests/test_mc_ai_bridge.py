@@ -1550,6 +1550,106 @@ class BridgeTests(unittest.TestCase):
             self.assertEqual(bridge.delivery.sent, [])
             self.assertEqual([call["kind"] for call in bridge.invoker.calls], ["prompt"])
 
+    def test_router_same_player_capability_refusal_can_use_followup_cap_when_exchange_is_still_active(self):
+        config = self.make_config()
+        config["auth"]["players"] = {"alice": ["assist"]}
+        config["maxBotConsecutiveReplies"] = 4
+        config["followupReplyWindowSeconds"] = 180
+        config["maxSamePlayerConversationReplies"] = 8
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = self.make_state(tmpdir)
+            now = time.time()
+            state.data["botConsecutiveReplyCount"] = 4
+            state.data["lastGlobalReplyTs"] = now - 20
+            state.data["lastPlayerReplyTs"] = {"alice": now - 20}
+            state.data["recentBotReplies"] = [
+                {"text": "Earlier bot reply.", "timestamp": now - 20},
+            ]
+            state.data["recentChat"] = [
+                {"speaker": "mini-huan", "text": "Earlier bot reply.", "timestamp": now - 20, "type": "bot"},
+            ]
+            bridge = MCAIBridge(config=config, state=state)
+            bridge.invoker = PrivilegedInvoker(
+                router_response={
+                    "mode": "chat",
+                    "requested_mode": "command",
+                    "denied_by_permission": True,
+                    "confidence": 0.97,
+                    "enter_or_continue": "none",
+                    "private_requested": False,
+                    "chat_should_reply": True,
+                    "chat_reason": "capability_refusal",
+                    "allow_followup_streak": True,
+                    "topic": "diamond stack",
+                    "reason": "same-player direct refusal continues the still-active exchange",
+                },
+                reply_text="I can't hand out a stack of diamonds from here.",
+            )
+            bridge.delivery = PrivilegedDelivery()
+
+            bridge.handle_event(
+                {
+                    "type": "chat",
+                    "player": "alice",
+                    "message": "huan give me a stack of diamonds",
+                    "raw": "<alice> huan give me a stack of diamonds",
+                }
+            )
+
+            self.assertEqual(bridge.delivery.sent, ["I can't hand out a stack of diamonds from here."])
+            self.assertEqual([call["kind"] for call in bridge.invoker.calls], ["prompt", "prompt"])
+
+    def test_router_same_player_followup_cap_still_blocks_after_conversation_limit(self):
+        config = self.make_config()
+        config["auth"]["players"] = {"alice": ["assist"]}
+        config["maxBotConsecutiveReplies"] = 1
+        config["followupReplyWindowSeconds"] = 180
+        config["maxSamePlayerConversationReplies"] = 2
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = self.make_state(tmpdir)
+            now = time.time()
+            state.data["botConsecutiveReplyCount"] = 2
+            state.data["lastGlobalReplyTs"] = now - 12
+            state.data["lastPlayerReplyTs"] = {"alice": now - 12}
+            state.data["recentBotReplies"] = [
+                {"text": "Earlier bot reply.", "timestamp": now - 12},
+            ]
+            state.data["recentChat"] = [
+                {"speaker": "mini-huan", "text": "Earlier bot reply.", "timestamp": now - 12, "type": "bot"},
+            ]
+            bridge = MCAIBridge(config=config, state=state)
+            bridge.invoker = PrivilegedInvoker(
+                router_response={
+                    "mode": "chat",
+                    "requested_mode": "chat",
+                    "denied_by_permission": False,
+                    "confidence": 0.96,
+                    "enter_or_continue": "none",
+                    "private_requested": False,
+                    "chat_should_reply": True,
+                    "chat_reason": "direct_question_to_bot",
+                    "allow_followup_streak": True,
+                    "topic": "one more same-player question",
+                    "reason": "same-player direct question still counts as the active short exchange",
+                },
+                reply_text="unused",
+            )
+            bridge.delivery = PrivilegedDelivery()
+
+            bridge.handle_event(
+                {
+                    "type": "chat",
+                    "player": "alice",
+                    "message": "huan are you still there?",
+                    "raw": "<alice> huan are you still there?",
+                }
+            )
+
+            self.assertEqual(bridge.delivery.sent, [])
+            self.assertEqual([call["kind"] for call in bridge.invoker.calls], ["prompt"])
+
     def test_router_chat_followup_uses_active_session_without_judge(self):
         config = self.make_config()
         config["auth"]["players"] = {"alice": ["assist"]}
@@ -2138,6 +2238,72 @@ class BridgeTests(unittest.TestCase):
                 "Some commands did not finish cleanly, so try again or rephrase it.",
             )
 
+    def test_privileged_partial_failure_keeps_helper_failure_summary(self):
+        config = self.make_config()
+        config["auth"]["players"] = {"alice": ["assist"]}
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = self.make_state(tmpdir)
+            bridge = MCAIBridge(config=config, state=state)
+            bridge.invoker = PrivilegedInvoker(
+                router_response={
+                    "mode": "assist",
+                    "requested_mode": "assist",
+                    "denied_by_permission": False,
+                    "confidence": 0.94,
+                    "enter_or_continue": "enter",
+                    "private_requested": False,
+                    "topic": "give starter items",
+                    "reason": "authorized assist request",
+                },
+                privileged_responses=[
+                    {
+                        "status": "run_commands",
+                        "commands": ["give alice bread 1", "give missing bread 1"],
+                        "reply": "",
+                        "topic": "give starter items",
+                        "reason": "need to try both item grants first",
+                    },
+                    {
+                        "status": "completed",
+                        "commands": [],
+                        "reply": "I gave bread to alice, but the second target was not found.",
+                        "topic": "give starter items",
+                        "reason": "summarized mixed command results",
+                    },
+                ],
+                session_ids=["priv-session-mixed", "priv-session-mixed"],
+            )
+            bridge.delivery = PrivilegedDelivery(
+                command_results={
+                    "give alice bread 1": "OK: Gave 1 [Bread] to alice",
+                    "give missing bread 1": {"sent": False, "reason": "No entity was found"},
+                }
+            )
+
+            bridge.handle_event(
+                {
+                    "type": "chat",
+                    "player": "alice",
+                    "message": "huan give us starter bread",
+                    "raw": "<alice> huan give us starter bread",
+                }
+            )
+
+            self.assertEqual(bridge.delivery.commands, ["give alice bread 1", "give missing bread 1"])
+            self.assertEqual(
+                bridge.delivery.sent,
+                ["I gave bread to alice, but the second target was not found."],
+            )
+            session = state.data["playerSessions"]["alice"]
+            self.assertEqual(session["sessionId"], "priv-session-mixed")
+            self.assertEqual(
+                session["lastReplyText"],
+                "I gave bread to alice, but the second target was not found.",
+            )
+            self.assertTrue(session["lastCommandResults"][0]["ok"])
+            self.assertFalse(session["lastCommandResults"][1]["ok"])
+
     def test_privileged_route_can_reply_privately_when_requested(self):
         config = self.make_config()
         config["auth"]["players"] = {"alice": ["operator"]}
@@ -2454,7 +2620,7 @@ class BridgeTests(unittest.TestCase):
             self.assertEqual(config["helperWorkspacePath"], r"C:\Users\Administrator\.openclaw\workspace-mc-helper")
             self.assertEqual(config["displayNameZh"], "小幻")
             self.assertEqual(config["nameAliases"], ["huan"])
-            self.assertEqual(config["maxBotConsecutiveReplies"], 4)
+            self.assertEqual(config["maxBotConsecutiveReplies"], 8)
             self.assertEqual(config["followupReplyWindowSeconds"], 180)
             self.assertEqual(config["maxSamePlayerConversationReplies"], 20)
             self.assertEqual(config["botStyle"]["persona"], "Minecraft public-chat helper")

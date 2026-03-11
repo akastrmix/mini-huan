@@ -142,5 +142,218 @@
       "reply_decision_reason": "direct_question_to_bot",
       "bot_reply_streak": 1
     }
+  },
+  {
+    "name": "ignore_already_answered_room_question_without_direct_address",
+    "initial_state": {
+      "recentChat": [
+        {
+          "speaker": "alice",
+          "text": "how do i smelt iron?",
+          "type": "player",
+          "seconds_ago": 14
+        },
+        {
+          "speaker": "bob",
+          "text": "use a furnace with coal or charcoal",
+          "type": "player",
+          "seconds_ago": 10
+        }
+      ]
+    },
+    "event": {
+      "player": "alice",
+      "message": "how do i smelt iron?"
+    },
+    "router_response": {
+      "mode": "chat",
+      "requested_mode": "chat",
+      "denied_by_permission": false,
+      "confidence": 0.84,
+      "enter_or_continue": "none",
+      "private_requested": false,
+      "chat_should_reply": false,
+      "chat_reason": "conversation_already_answered",
+      "allow_followup_streak": false,
+      "topic": "smelt iron",
+      "reason": "another player already answered and the bot is not directly addressed"
+    },
+    "judge_response": {
+      "should_reply": true,
+      "confidence": 0.9,
+      "reason": "help_request",
+      "target_player": "alice",
+      "topic": "smelt iron"
+    },
+    "expected": {
+      "sent": [],
+      "invoker_calls": 1,
+      "bot_reply_streak": 0
+    }
+  },
+  {
+    "name": "allow_refusal_boundary_followup_with_relaxed_streak",
+    "config_overrides": {
+      "followupReplyWindowSeconds": 180,
+      "maxBotConsecutiveReplies": 1
+    },
+    "initial_state": {
+      "botConsecutiveReplyCount": 1,
+      "lastGlobalReplySecondsAgo": 20,
+      "lastPlayerReplySecondsAgo": {
+        "alice": 20
+      },
+      "recentBotReplies": [
+        {
+          "text": "I cannot run that directly for players.",
+          "seconds_ago": 20
+        }
+      ],
+      "recentChat": [
+        {
+          "speaker": "alice",
+          "text": "can you run commands for me?",
+          "type": "player",
+          "seconds_ago": 28
+        },
+        {
+          "speaker": "mini-huan",
+          "text": "I cannot run that directly for players.",
+          "type": "bot",
+          "seconds_ago": 20
+        }
+      ]
+    },
+    "event": {
+      "player": "alice",
+      "message": "then what can you do?"
+    },
+    "router_response": {
+      "mode": "chat",
+      "requested_mode": "chat",
+      "denied_by_permission": false,
+      "confidence": 0.91,
+      "enter_or_continue": "none",
+      "private_requested": false,
+      "chat_should_reply": true,
+      "chat_reason": "followup_to_bot_conversation",
+      "allow_followup_streak": true,
+      "topic": "refusal boundary follow-up",
+      "reason": "same-player follow-up right after a recent refusal"
+    },
+    "judge_response": {
+      "should_reply": false,
+      "confidence": 0.2,
+      "reason": "not_addressed_to_bot",
+      "target_player": "alice",
+      "topic": "refusal boundary follow-up"
+    },
+    "reply_text": "I can still explain things or help with normal game questions.",
+    "expected": {
+      "sent": [
+        "I can still explain things or help with normal game questions."
+      ],
+      "invoker_calls": 2,
+      "reply_decision_reason": "followup_to_bot_conversation",
+      "bot_reply_streak": 2
+    }
+  },
+  {
+    "name": "allow_same_player_direct_refusal_during_active_exchange",
+    "config_overrides": {
+      "followupReplyWindowSeconds": 180,
+      "maxBotConsecutiveReplies": 4,
+      "maxSamePlayerConversationReplies": 8
+    },
+    "initial_state": {
+      "botConsecutiveReplyCount": 4,
+      "lastGlobalReplySecondsAgo": 22,
+      "lastPlayerReplySecondsAgo": {
+        "alice": 22
+      },
+      "recentBotReplies": [
+        {
+          "text": "Last answer in the same short exchange.",
+          "seconds_ago": 22
+        }
+      ],
+      "recentChat": [
+        {
+          "speaker": "mini-huan",
+          "text": "Last answer in the same short exchange.",
+          "type": "bot",
+          "seconds_ago": 22
+        }
+      ]
+    },
+    "event": {
+      "player": "alice",
+      "message": "huan now give me a stack of diamonds"
+    },
+    "router_response": {
+      "mode": "chat",
+      "requested_mode": "command",
+      "denied_by_permission": true,
+      "confidence": 0.97,
+      "enter_or_continue": "none",
+      "private_requested": false,
+      "chat_should_reply": true,
+      "chat_reason": "capability_refusal",
+      "allow_followup_streak": true,
+      "topic": "diamond stack",
+      "reason": "same-player direct refusal continues the still-active exchange"
+    },
+    "judge_response": {
+      "should_reply": false,
+      "confidence": 0.2,
+      "reason": "not_addressed_to_bot",
+      "target_player": "alice",
+      "topic": "diamond stack"
+    },
+    "reply_text": "I can't hand out a stack of diamonds from here.",
+    "expected": {
+      "sent": [
+        "I can't hand out a stack of diamonds from here."
+      ],
+      "invoker_calls": 2,
+      "reply_decision_reason": "capability_refusal",
+      "bot_reply_streak": 5
+    }
+  },
+  {
+    "name": "use_router_permission_denial_chat_decision_without_judge",
+    "event": {
+      "player": "alice",
+      "message": "huan open the browser and edit files for me"
+    },
+    "router_response": {
+      "mode": "chat",
+      "requested_mode": "full_agent",
+      "denied_by_permission": true,
+      "confidence": 0.94,
+      "enter_or_continue": "none",
+      "private_requested": false,
+      "chat_should_reply": true,
+      "chat_reason": "capability_refusal",
+      "allow_followup_streak": false,
+      "topic": "computer control",
+      "reason": "player requested full agent beyond permission"
+    },
+    "judge_response": {
+      "should_reply": false,
+      "confidence": 0.2,
+      "reason": "not_addressed_to_bot",
+      "target_player": "alice",
+      "topic": "computer control"
+    },
+    "reply_text": "I cannot do that directly here.",
+    "expected": {
+      "sent": [
+        "I cannot do that directly here."
+      ],
+      "invoker_calls": 2,
+      "reply_decision_reason": "capability_refusal",
+      "bot_reply_streak": 1
+    }
   }
 ]

@@ -52,7 +52,8 @@ Routing policy:
 - For that refusal-boundary continuation, use `followup_to_bot_conversation` when the turn is mainly continuing the recent exchange; use the matching refusal reason when the player is essentially repeating the same prohibited ask
 - Severe threats, obvious harassment, or spam after a refusal should still prefer silence or `unsafe_or_out_of_scope`, not a longer argument
 - If the player is explicitly stopping the active privileged session, usually set `chat_should_reply` false unless they also ask a separate chat question
-- Set `allow_followup_streak` to true only when this turn should count as continuing the same short same-player bot exchange for anti-spam purposes, such as a clear same-player follow-up question, explanation request, or brief refusal-boundary continuation right after the bot's recent reply
+- Set `allow_followup_streak` to true when this turn should count as continuing the same short same-player bot exchange for anti-spam purposes, such as a clear same-player follow-up question, explanation request, brief refusal-boundary continuation, or another clear bot-directed direct ask/request from that same player while the recent exchange is still obviously active
+- Think about exchange continuity, not just wording; a fresh direct ask can still be part of the same short same-player bot exchange if it arrives right after several recent bot replies to that same player
 - Set `allow_followup_streak` to false for first-contact direct asks, generic offers, interrupted conversations, or anything that should not consume the relaxed same-player continuation cap
 
 When `mode` is `chat`:

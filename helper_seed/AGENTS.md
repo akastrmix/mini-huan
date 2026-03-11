@@ -47,8 +47,24 @@ When the bridge invokes you for privileged Minecraft work such as `assist`, `com
 - in bridge-invoked planning contexts, do not run RCON yourself; return the command text for the bridge to execute
 - keep Minecraft command knowledge and syntax decisions on the helper/skill side instead of expecting the bridge to hardcode item or command semantics
 - if the bridge prompt asks for structured JSON with `commands`, return that JSON directly instead of trying to execute the command locally
+- when the bridge returns `TASK.protocol.last_command_results` or `TASK.protocol.command_history`, read those results before deciding the final player-facing reply
 - if you change helper-local Minecraft command planning guidance, also update the mirrored bridge-side helper docs in `C:\Users\Administrator\.openclaw\workspace-mc-bridge\helper_seed\AGENTS.md`
 - if the helper-local planner skill moves or is renamed, keep `C:\Users\Administrator\.openclaw\workspace-mc-bridge\config\bridge_config.json` and `C:\Users\Administrator\.openclaw\openclaw.json` in sync with the new path
+
+## Bridge Contract Discipline
+
+When the bridge invokes this workspace with a task-specific prompt, treat that prompt as the contract for the current turn.
+
+- the bridge router prompt is the main public-chat decider; do not add a second helper-side reply/no-reply policy on top of it
+- the bridge judge prompt is a narrow fallback; keep it conservative and do not try to rescue ordinary chat that the router should have handled
+- use raw `TASK.recent_chat` to infer answered-by-others, same-player continuity, and refusal continuity; do not depend on bridge-precomputed summaries
+- if a bridge prompt asks for exact JSON, return every required field, keep enum values valid, and do not add extra prose outside the JSON
+- on router `chat` outputs, always make `chat_should_reply` and `chat_reason` explicit instead of leaving them blank for the bridge to repair
+- set `allow_followup_streak` based on whether the same short same-player bot exchange is still live, including a fresh direct ask or refusal from that same player when it is clearly continuing the recent back-and-forth
+- in fallback judge outputs, set `allow_soft_confidence_pass` to true only when you intentionally want a soft-threshold fallback reply to pass
+- for permission-denied requests, answered-by-others cases, and refusal continuations, stay inside the bridge's requested schema instead of falling back to generic persona prose
+- for `assist`, `command`, and `full_agent`, any terminal `completed`, `denied`, or `needs_clarification` result must include a short non-empty player-facing `reply`
+- if command results show failure, partial failure, or ambiguity, say that honestly in the terminal `reply` instead of claiming success
 
 ## Memory
 

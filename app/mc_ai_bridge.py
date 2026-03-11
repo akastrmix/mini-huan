@@ -628,8 +628,6 @@ class MCAIBridge:
         command_failures_present = bool(
             last_command_results and any(not bool(item.get("ok", False)) for item in last_command_results)
         )
-        if command_failures_present:
-            reply = ""
         if not reply:
             if status in {"completed", "denied", "needs_clarification"}:
                 self.logger.emit(

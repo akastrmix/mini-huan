@@ -99,6 +99,7 @@ Behavior notes:
 - Same-player natural boundary continuations right after a recent refusal should also prefer the router-owned `chat` path before judge fallback is considered
 - The relaxed same-player streak cap now depends on an explicit helper continuation signal rather than bridge-local inference from reason labels plus recent chat ordering
 - Terminal privileged results should now include a non-empty player-facing reply from the helper; the bridge only uses generic fallback status/error text when that contract is missed
+- If command results include failures, the bridge now preserves an explicit helper-written failure or partial-success summary instead of overwriting it with generic text; the generic fallback only appears when the helper leaves the terminal reply empty
 - The bridge-local router fallback is now intentionally minimal: it mainly preserves active-session continuation, exit, and explicit raw command fallback after router failure
 - Continuation phrases such as `again`, `one more`, or `再来一组` can reuse the player's last successful privileged command context
 
@@ -167,6 +168,7 @@ Pitfalls:
   - Caps extended reply streaks; the streak resets when a player turn ends without a bot reply
 - `followupReplyWindowSeconds`
   - If the same player was replied to within this many seconds and the router or fallback judge explicitly marks the new turn as continuing that exchange, the relaxed same-player conversation cap can apply, including short refusal/limitation replies
+  - Helper-side `allow_followup_streak` should describe whether the same short same-player bot exchange is still active, not just literal explanation-style follow-up wording
 - `maxSamePlayerConversationReplies`
   - Total consecutive replies allowed during a short same-player follow-up exchange before the normal streak gate starts blocking again
   - This relaxed cap only applies when the helper explicitly returns the continuation flag for that turn

@@ -20,14 +20,14 @@ class FixtureInvoker:
     def __init__(self, *, judge_response: dict, reply_text: str | None = None, router_response: dict | None = None):
         self.calls = []
         self.router_response = dict(router_response or {})
-        self.responses = [
-            (json.dumps(judge_response, ensure_ascii=False), {}),
-        ]
-        if reply_text is not None:
-            self.responses.append((reply_text, {"reply": reply_text}))
+        self.judge_response = (json.dumps(judge_response, ensure_ascii=False), {})
+        self.reply_text = reply_text
 
     def _is_router_prompt(self, prompt_path):
         return "router_prompt.txt" in str(prompt_path)
+
+    def _is_reply_prompt(self, prompt_path):
+        return "reply_prompt.txt" in str(prompt_path)
 
     def _synthetic_router_fallback_response(self):
         if self.router_response:
@@ -49,9 +49,11 @@ class FixtureInvoker:
                 self.calls.append({"payload": payload, "prompt_path": prompt_path})
             return self._synthetic_router_fallback_response()
         self.calls.append({"payload": payload, "prompt_path": prompt_path})
-        if not self.responses:
-            raise AssertionError("No fixture responses left for call_prompt")
-        return self.responses.pop(0)
+        if self._is_reply_prompt(prompt_path):
+            if self.reply_text is None:
+                raise AssertionError("No fixture reply_text configured for reply prompt")
+            return self.reply_text, {"reply": self.reply_text}
+        return self.judge_response
 
 
 class StubDelivery:

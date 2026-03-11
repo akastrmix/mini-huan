@@ -193,7 +193,7 @@ Current cooldowns:
 
 Current anti-flood behavior:
 - Duplicate-event protection enabled
-- `maxBotConsecutiveReplies=4`
+- `maxBotConsecutiveReplies=8`
 - Same-player follow-ups within `followupReplyWindowSeconds=180` can continue only when the router or fallback judge explicitly marks the turn as a continuation, up to `maxSamePlayerConversationReplies=20`
 - `botReplyStreakResetSeconds=180`
 - Appreciation acknowledgments may consume one extra consecutive turn
@@ -230,6 +230,7 @@ Notes:
 - `assist` and `command` now support a bridge-managed multi-step command loop, so the helper can probe live state, inspect real stdout, and then continue or summarize
 - Same-player follow-up questions right after a privileged result or recent refusal now stay on the router/helper path first, so they can reuse the stored privileged or conversational context even when the player does not repeat the bot's name
 - The relaxed same-player streak cap now depends on an explicit helper continuation signal rather than bridge-local inference from reason labels plus recent chat ordering
+- The global consecutive-reply cap is mainly for room-level flood control; when the same player is still clearly in one short active bot exchange, the helper should mark that with `allow_followup_streak` so the bridge can use the same-player conversation cap instead of prematurely swallowing an obvious reply
 - Terminal privileged results should now include a non-empty player-facing reply from the helper; the bridge only falls back to generic status/error text when that contract is missed
 
 ## Helper-local Planner
@@ -267,6 +268,7 @@ Behavior notes:
 - If the privileged helper route errors, the bridge can still fall back to the helper-local planner script
 - In the main helper path, the bridge now returns actual command stdout/error results back to the helper between `assist`/`command` steps
 - In the main helper path, one-shot `assist`/`command` actions with commands are confirmed through a result round before the final player-facing reply, so the helper can react to `No entity was found`-style outcomes instead of blindly claiming success
+- If some privileged commands fail or only partially succeed, the helper can now keep an explicit player-facing failure/partial-success summary; the bridge only falls back to generic failure text when the helper leaves the terminal reply empty
 
 Sync checklist when planner behavior changes:
 - Update [bridge_config.json](/C:/Users/Administrator/.openclaw/workspace-mc-bridge/config/bridge_config.json) if the planner script path changes
