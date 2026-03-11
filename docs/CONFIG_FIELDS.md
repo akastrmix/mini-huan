@@ -23,13 +23,14 @@ This file explains the fields in `bridge_config.json` as the bridge works today.
 - `commandPromptPath`
   - Privileged Minecraft command prompt file
 - `commandPlannerScriptPath`
-  - Bridge-side local fallback planner script for the helper-local Minecraft command planning skill
+  - Bridge-side local privileged-execution fallback planner script for the helper-local Minecraft command planning skill
   - This is the bridge-side single source of truth for the local planner path
   - If the helper-local planner skill moves or is renamed, update this field instead of hardcoding the new path in prompts or code
 - `fullAgentPromptPath`
   - Full-agent prompt file for fully authorized players
 - `helperWorkspacePath`
   - Workspace root where the downstream `mc-helper` agent should run; the bridge uses it as the `openclaw agent` subprocess `cwd`
+  - This does not guarantee the resolved OpenClaw session stays inside that workspace if an existing stored session is resumed; verify `runtime/last_invoke_debug.txt` when the helper workspace or skills summary looks wrong
 
 ## Delivery
 
@@ -83,6 +84,7 @@ Behavior notes:
 - Privileged routing is only attempted for players whose configured `max_mode` is above `chat`, or who already have an active privileged session
 - Public reply is still the default; private reply only happens when the player explicitly asks for it
 - Privileged sessions are tracked per player, not globally
+- The bridge-local router fallback still contains some keyword-based heuristics for `assist`, `command`, and `full_agent`; routing is not yet fully delegated to helper-side command reasoning
 - Continuation phrases such as `again`, `one more`, or `再来一组` can reuse the player's last successful privileged command context
 
 ## Helper-local planner wiring
@@ -101,6 +103,8 @@ Current moving parts:
 Pitfalls:
 - If you rename or move the helper-local planner skill without updating `commandPlannerScriptPath`, privileged fallback planning will silently stop working
 - If you move the helper-local skill directory without updating `skills.load.extraDirs`, the skill may disappear from the Control UI and runtime skill list
+- If OpenClaw resumes a stored session outside `helperWorkspacePath`, the helper-side skill summary and injected workspace files may not match the bridge's intended helper workspace
+- If you assume `commandPlannerScriptPath` controls all privileged routing decisions, you may miss that the bridge-local router fallback still makes some keyword-based mode choices before helper execution fallback kicks in
 - Do not duplicate the planner path in multiple prompt or doc files; keep the path authoritative in `bridge_config.json`
 
 ## Message filtering

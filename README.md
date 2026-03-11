@@ -216,6 +216,7 @@ Available modes:
 Notes:
 - Privileged routing is only attempted for players whose configured max mode is above `chat`, or who already have an active privileged session
 - Sessions are tracked per player, not globally
+- The bridge launches helper calls from `helperWorkspacePath`, but OpenClaw can still resume a previously stored session; if the resolved workspace or injected skills look wrong, inspect `runtime/last_invoke_debug.txt`
 - Public reply remains the default; private reply only happens when the player explicitly asks for it
 
 ## Helper-local Planner
@@ -242,6 +243,8 @@ Current generic execution skill kept separate:
 
 Behavior notes:
 - The helper-local planner is planner-first; the bridge still owns actual RCON delivery
+- `commandPlannerScriptPath` currently powers the local privileged execution fallback path; it is not yet the main router's source of truth for all command/query detection
+- The bridge-local router fallback still contains keyword-based heuristics for `assist`, `command`, and `full_agent`, so command/query intent is not fully delegated to the helper side yet
 - Follow-up shorthand like `again`, `one more`, or `再来一组` is resolved using per-player last successful privileged execution context
 - If the privileged helper route errors, the bridge can fall back to the helper-local planner script
 
@@ -292,6 +295,7 @@ Quick diagnosis:
 - Bot never speaks: inspect judge summaries and errors
 - Bot replies oddly: inspect judge/reply inputs and selected context
 - Bot uses stale context: inspect age/window settings
+- Helper workspace/skills look wrong: inspect `runtime/last_invoke_debug.txt` for the resolved `workspaceDir`, `sessionId`, and `systemPromptReport.skills`
 - Bot is too noisy or too quiet: adjust `judge_prompt.txt` and thresholds before changing reply style
 
 ## Chat Quality Tools
