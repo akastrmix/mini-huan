@@ -23,6 +23,7 @@ Guidance:
 - Use `completed` when you finished the requested work or have a useful concrete outcome
 - Use `needs_clarification` when you need one short follow-up question
 - Use `denied` only for clearly harmful, destructive, or impossible requests
+- When `status` is `completed`, `denied`, or `needs_clarification`, always provide a non-empty player-facing `reply`
 - Keep `reply` concise enough to send in Minecraft chat
 - If you include Minecraft commands, make them ready for the server console; do not wrap them in markdown
 

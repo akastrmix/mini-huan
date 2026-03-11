@@ -391,47 +391,7 @@ class BridgeTests(unittest.TestCase):
                 2.5,
             )
 
-    def test_detect_human_answer_seen_handles_chinese_overlap(self):
-        config = self.make_config()
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            state = self.make_state(tmpdir)
-            now = time.time()
-            state.data["recentChat"] = [
-                {"speaker": "bob", "text": "你可以用钻石镐挖黑曜石。", "timestamp": now - 5, "type": "player"},
-            ]
-
-            builder = ContextBuilder(config, state, Logger(config))
-            self.assertTrue(builder.detect_human_answer_seen("alice", "黑曜石怎么挖？"))
-
-    def test_detect_human_answer_seen_handles_short_natural_chinese_answer(self):
-        config = self.make_config()
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            state = self.make_state(tmpdir)
-            now = time.time()
-            state.data["recentChat"] = [
-                {"speaker": "alice", "text": "黑曜石怎么挖？", "timestamp": now - 8, "type": "player"},
-                {"speaker": "bob", "text": "用钻石镐挖。", "timestamp": now - 4, "type": "player"},
-            ]
-
-            builder = ContextBuilder(config, state, Logger(config))
-            self.assertTrue(builder.detect_human_answer_seen("alice", "黑曜石怎么挖？"))
-
-    def test_detect_human_answer_seen_handles_short_yes_no_answer(self):
-        config = self.make_config()
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            state = self.make_state(tmpdir)
-            now = time.time()
-            state.data["recentChat"] = [
-                {"speaker": "bob", "text": "yes", "timestamp": now - 4, "type": "player"},
-            ]
-
-            builder = ContextBuilder(config, state, Logger(config))
-            self.assertTrue(builder.detect_human_answer_seen("alice", "can i sleep now?"))
-
-    def test_human_answer_candidates_capture_recent_player_answer(self):
+    def test_build_router_context_exposes_recent_room_chat_without_precomputed_human_answer_flags(self):
         config = self.make_config()
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -443,11 +403,45 @@ class BridgeTests(unittest.TestCase):
             ]
 
             builder = ContextBuilder(config, state, Logger(config))
-            candidates = builder.human_answer_candidates("alice", "how do i mine obsidian?")
+            context = builder.build_router_context(
+                {
+                    "type": "chat",
+                    "player": "alice",
+                    "message": "how do i mine obsidian?",
+                    "raw": "<alice> how do i mine obsidian?",
+                },
+                {"player": "alice", "groups": ["default"], "max_mode": "chat"},
+                None,
+            )
 
-            self.assertEqual(len(candidates), 1)
-            self.assertEqual(candidates[0]["speaker"], "bob")
-            self.assertIn("diamond pickaxe", candidates[0]["text"])
+            self.assertEqual([item["speaker"] for item in context["recent_chat"]][-2:], ["alice", "bob"])
+            self.assertNotIn("human_answer_seen", context["room_state"])
+            self.assertNotIn("human_answer_candidates", context["room_state"])
+
+    def test_build_judge_context_omits_precomputed_human_answer_flags(self):
+        config = self.make_config()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = self.make_state(tmpdir)
+            now = time.time()
+            state.data["recentChat"] = [
+                {"speaker": "alice", "text": "can i sleep now?", "timestamp": now - 8, "type": "player"},
+                {"speaker": "bob", "text": "yes", "timestamp": now - 4, "type": "player"},
+            ]
+
+            builder = ContextBuilder(config, state, Logger(config))
+            context = builder.build_judge_context(
+                {
+                    "type": "chat",
+                    "player": "alice",
+                    "message": "can i sleep now?",
+                    "raw": "<alice> can i sleep now?",
+                }
+            )
+
+            self.assertEqual([item["speaker"] for item in context["recent_chat"]][-2:], ["alice", "bob"])
+            self.assertNotIn("human_answer_seen", context["room_state"])
+            self.assertNotIn("human_answer_candidates", context["room_state"])
 
     def test_handle_event_resets_streak_when_judge_declines(self):
         config = self.make_config()
@@ -506,6 +500,50 @@ class BridgeTests(unittest.TestCase):
 
             self.assertEqual(state.data["botConsecutiveReplyCount"], 2)
             self.assertEqual(bridge.delivery.sent, ["You are welcome!"])
+
+    def test_fallback_judge_soft_pass_requires_explicit_flag(self):
+        config = self.make_config()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = self.make_state(tmpdir)
+            bridge = MCAIBridge(config=config, state=state)
+            bridge.invoker = StubInvoker([
+                (json.dumps({
+                    "should_reply": True,
+                    "confidence": 0.6,
+                    "reason": "direct_question_to_bot",
+                    "target_player": "alice",
+                    "topic": "direct question below hard threshold",
+                }), {}),
+            ])
+            bridge.delivery = StubDelivery()
+
+            bridge.handle_event({"type": "chat", "player": "alice", "message": "hi huan", "raw": "<alice> hi huan"})
+
+            self.assertEqual(bridge.delivery.sent, [])
+
+    def test_fallback_judge_soft_pass_allows_explicit_flag(self):
+        config = self.make_config()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = self.make_state(tmpdir)
+            bridge = MCAIBridge(config=config, state=state)
+            bridge.invoker = StubInvoker([
+                (json.dumps({
+                    "should_reply": True,
+                    "confidence": 0.6,
+                    "reason": "direct_question_to_bot",
+                    "target_player": "alice",
+                    "topic": "direct question below hard threshold",
+                    "allow_soft_confidence_pass": True,
+                }), {}),
+                ("Hi!", {"reply": "Hi!"}),
+            ])
+            bridge.delivery = StubDelivery()
+
+            bridge.handle_event({"type": "chat", "player": "alice", "message": "hi huan", "raw": "<alice> hi huan"})
+
+            self.assertEqual(bridge.delivery.sent, ["Hi!"])
 
     def test_handle_event_allows_one_appreciation_reply_beyond_streak_limit(self):
         config = self.make_config()
@@ -568,6 +606,7 @@ class BridgeTests(unittest.TestCase):
                     "reason": "help_request",
                     "target_player": "alice",
                     "topic": "command help",
+                    "allow_followup_streak": True,
                 }), {}),
                 ("I can only answer in chat.", {"reply": "I can only answer in chat."}),
             ])
@@ -577,6 +616,41 @@ class BridgeTests(unittest.TestCase):
 
             self.assertEqual(state.data["botConsecutiveReplyCount"], 2)
             self.assertEqual(bridge.delivery.sent, ["I can only answer in chat."])
+
+    def test_handle_event_requires_explicit_followup_flag_for_relaxed_judge_streak(self):
+        config = self.make_config()
+        config["maxBotConsecutiveReplies"] = 1
+        config["followupReplyWindowSeconds"] = 90
+        config["maxSamePlayerConversationReplies"] = 8
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = self.make_state(tmpdir)
+            now = time.time()
+            state.data["botConsecutiveReplyCount"] = 1
+            state.data["lastGlobalReplyTs"] = now - 10
+            state.data["lastPlayerReplyTs"] = {"alice": now - 10}
+            state.data["recentBotReplies"] = [
+                {"text": "Earlier bot reply.", "timestamp": now - 10},
+            ]
+            state.data["recentChat"] = [
+                {"speaker": "mini-huan", "text": "Earlier bot reply.", "timestamp": now - 10, "type": "bot"},
+            ]
+            bridge = MCAIBridge(config=config, state=state)
+            bridge.invoker = StubInvoker([
+                (json.dumps({
+                    "should_reply": True,
+                    "confidence": 0.99,
+                    "reason": "followup_to_bot_conversation",
+                    "target_player": "alice",
+                    "topic": "follow-up without explicit continuation flag",
+                }), {}),
+            ])
+            bridge.delivery = StubDelivery()
+
+            bridge.handle_event({"type": "chat", "player": "alice", "message": "can you explain that again?", "raw": "<alice> can you explain that again?"})
+
+            self.assertEqual(state.data["botConsecutiveReplyCount"], 0)
+            self.assertEqual(bridge.delivery.sent, [])
 
     def test_handle_event_blocks_same_player_followup_after_conversation_cap(self):
         config = self.make_config()
@@ -604,6 +678,7 @@ class BridgeTests(unittest.TestCase):
                     "reason": "direct_question_to_bot",
                     "target_player": "alice",
                     "topic": "another follow-up",
+                    "allow_followup_streak": True,
                 }), {}),
             ])
             bridge.delivery = StubDelivery()
@@ -676,6 +751,7 @@ class BridgeTests(unittest.TestCase):
                             "reason": reason,
                             "target_player": "alice",
                             "topic": "refusal follow-up",
+                            "allow_followup_streak": True,
                         }), {}),
                         (reply_text, {"reply": reply_text}),
                     ])
@@ -764,6 +840,7 @@ class BridgeTests(unittest.TestCase):
                     "private_requested": False,
                     "chat_should_reply": True,
                     "chat_reason": "followup_to_bot_conversation",
+                    "allow_followup_streak": True,
                     "topic": "follow-up",
                     "reason": "same-player follow-up on the recent bot exchange",
                 },
@@ -834,6 +911,7 @@ class BridgeTests(unittest.TestCase):
                     "private_requested": False,
                     "chat_should_reply": True,
                     "chat_reason": "followup_to_bot_conversation",
+                    "allow_followup_streak": True,
                     "topic": "chinese follow-up",
                     "reason": "same-player chinese follow-up on the recent bot exchange",
                 },
@@ -940,6 +1018,7 @@ class BridgeTests(unittest.TestCase):
                     "private_requested": False,
                     "chat_should_reply": True,
                     "chat_reason": "followup_to_bot_conversation",
+                    "allow_followup_streak": True,
                     "topic": "pushback after capability refusal",
                     "reason": "same-player mild pushback after a recent capability refusal",
                 },
@@ -1349,6 +1428,7 @@ class BridgeTests(unittest.TestCase):
                     "private_requested": False,
                     "chat_should_reply": True,
                     "chat_reason": "followup_to_bot_conversation",
+                    "allow_followup_streak": True,
                     "topic": "used command explanation",
                     "reason": "same-player follow-up about the active assist result",
                 },
@@ -1395,6 +1475,81 @@ class BridgeTests(unittest.TestCase):
             self.assertIn("reply_prompt.txt", str(bridge.invoker.calls[1]["prompt_path"]))
             self.assertEqual(bridge.invoker.calls[1]["payload"]["decision"]["reason"], "greeting_to_bot")
 
+    def test_router_chat_reply_ignores_judge_confidence_thresholds_on_main_path(self):
+        config = self.make_config()
+        config["auth"]["players"] = {"alice": ["assist"]}
+        config["judgeConfidenceThreshold"] = 0.95
+        config["judgeSoftThreshold"] = 0.9
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = self.make_state(tmpdir)
+            bridge = MCAIBridge(config=config, state=state)
+            bridge.invoker = PrivilegedInvoker(
+                router_response={
+                    "mode": "chat",
+                    "requested_mode": "chat",
+                    "denied_by_permission": False,
+                    "confidence": 0.21,
+                    "enter_or_continue": "none",
+                    "private_requested": False,
+                    "chat_should_reply": True,
+                    "chat_reason": "direct_question_to_bot",
+                    "topic": "low-confidence main-path chat",
+                    "reason": "router still wants to answer the direct bot question",
+                },
+                reply_text="Yep.",
+            )
+            bridge.delivery = PrivilegedDelivery()
+
+            bridge.handle_event({"type": "chat", "player": "alice", "message": "huan are you there?", "raw": "<alice> huan are you there?"})
+
+            self.assertEqual(bridge.delivery.sent, ["Yep."])
+            self.assertEqual([call["kind"] for call in bridge.invoker.calls], ["prompt", "prompt"])
+            self.assertEqual(bridge.invoker.calls[1]["payload"]["decision"]["reason"], "direct_question_to_bot")
+
+    def test_router_followup_relaxation_requires_explicit_flag(self):
+        config = self.make_config()
+        config["auth"]["players"] = {"alice": ["assist"]}
+        config["maxBotConsecutiveReplies"] = 1
+        config["followupReplyWindowSeconds"] = 180
+        config["maxSamePlayerConversationReplies"] = 8
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = self.make_state(tmpdir)
+            now = time.time()
+            state.data["botConsecutiveReplyCount"] = 1
+            state.data["lastGlobalReplyTs"] = now - 12
+            state.data["lastPlayerReplyTs"] = {"alice": now - 12}
+            state.data["recentBotReplies"] = [
+                {"text": "Earlier bot reply.", "timestamp": now - 12},
+            ]
+            state.data["recentChat"] = [
+                {"speaker": "mini-huan", "text": "Earlier bot reply.", "timestamp": now - 12, "type": "bot"},
+            ]
+            bridge = MCAIBridge(config=config, state=state)
+            bridge.invoker = PrivilegedInvoker(
+                router_response={
+                    "mode": "chat",
+                    "requested_mode": "chat",
+                    "denied_by_permission": False,
+                    "confidence": 0.94,
+                    "enter_or_continue": "none",
+                    "private_requested": False,
+                    "chat_should_reply": True,
+                    "chat_reason": "followup_to_bot_conversation",
+                    "allow_followup_streak": False,
+                    "topic": "follow-up without explicit continuation flag",
+                    "reason": "router thinks this is reply-worthy but not a relaxed streak continuation",
+                },
+                reply_text="unused",
+            )
+            bridge.delivery = PrivilegedDelivery()
+
+            bridge.handle_event({"type": "chat", "player": "alice", "message": "can you explain that again?", "raw": "<alice> can you explain that again?"})
+
+            self.assertEqual(bridge.delivery.sent, [])
+            self.assertEqual([call["kind"] for call in bridge.invoker.calls], ["prompt"])
+
     def test_router_chat_followup_uses_active_session_without_judge(self):
         config = self.make_config()
         config["auth"]["players"] = {"alice": ["assist"]}
@@ -1430,6 +1585,7 @@ class BridgeTests(unittest.TestCase):
                     "private_requested": False,
                     "chat_should_reply": True,
                     "chat_reason": "followup_to_bot_conversation",
+                    "allow_followup_streak": True,
                     "topic": "used command explanation",
                     "reason": "same-player follow-up about the active assist result",
                 },
@@ -1666,7 +1822,7 @@ class BridgeTests(unittest.TestCase):
 
             self.assertEqual(state.data["botConsecutiveReplyCount"], 2)
 
-    def test_multi_turn_repeated_question_sets_human_answer_context(self):
+    def test_multi_turn_repeated_question_keeps_recent_room_chat_visible_to_helper(self):
         config = self.make_config()
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1703,10 +1859,11 @@ class BridgeTests(unittest.TestCase):
             bridge.handle_event({"type": "chat", "player": "alice", "message": "how do i mine obsidian?", "raw": "[00:00:09] <alice> how do i mine obsidian?"})
 
             third_payload = invoker.calls[2]["payload"]
-            self.assertTrue(third_payload["room_state"]["human_answer_seen"])
-            self.assertEqual(third_payload["room_state"]["human_answer_candidates"][0]["speaker"], "bob")
+            self.assertEqual([item["speaker"] for item in third_payload["recent_chat"]][-3:], ["alice", "bob", "alice"])
+            self.assertNotIn("human_answer_seen", third_payload["room_state"])
+            self.assertNotIn("human_answer_candidates", third_payload["room_state"])
 
-    def test_multi_turn_yes_no_reply_sets_human_answer_context(self):
+    def test_multi_turn_yes_no_reply_keeps_recent_room_chat_visible_to_helper(self):
         config = self.make_config()
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1743,8 +1900,9 @@ class BridgeTests(unittest.TestCase):
             bridge.handle_event({"type": "chat", "player": "alice", "message": "can i sleep now?", "raw": "[00:00:08] <alice> can i sleep now?"})
 
             third_payload = invoker.calls[2]["payload"]
-            self.assertTrue(third_payload["room_state"]["human_answer_seen"])
-            self.assertEqual(third_payload["room_state"]["human_answer_candidates"][0]["text"], "yes")
+            self.assertEqual([item["text"] for item in third_payload["recent_chat"]][-3:], ["can i sleep now?", "yes", "can i sleep now?"])
+            self.assertNotIn("human_answer_seen", third_payload["room_state"])
+            self.assertNotIn("human_answer_candidates", third_payload["room_state"])
 
     def test_privileged_assist_route_executes_commands_and_records_player_session(self):
         config = self.make_config()
@@ -1917,6 +2075,68 @@ class BridgeTests(unittest.TestCase):
             self.assertEqual(bridge.delivery.sent, ["这次没找到你附近的苦力怕。"])
             session = state.data["playerSessions"]["alice"]
             self.assertEqual(session["lastCommandResults"][0]["stdout"], "OK: No entity was found")
+
+    def test_privileged_missing_final_reply_after_failed_commands_uses_failure_fallback(self):
+        config = self.make_config()
+        config["auth"]["players"] = {"alice": ["assist"]}
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = self.make_state(tmpdir)
+            bridge = MCAIBridge(config=config, state=state)
+            bridge.invoker = PrivilegedInvoker(
+                router_response={
+                    "mode": "assist",
+                    "requested_mode": "assist",
+                    "denied_by_permission": False,
+                    "confidence": 0.93,
+                    "enter_or_continue": "enter",
+                    "private_requested": False,
+                    "topic": "clear nearby creepers",
+                    "reason": "nearby mob cleanup",
+                },
+                privileged_responses=[
+                    {
+                        "status": "completed",
+                        "commands": ["kill @e[type=minecraft:creeper,distance=..16]"],
+                        "reply": "",
+                        "topic": "clear nearby creepers",
+                        "reason": "one-step cleanup",
+                    },
+                    {
+                        "status": "completed",
+                        "commands": [],
+                        "reply": "",
+                        "topic": "clear nearby creepers",
+                        "reason": "missing final reply after command failure",
+                    },
+                ],
+            )
+            bridge.delivery = PrivilegedDelivery(
+                command_results={
+                    "kill @e[type=minecraft:creeper,distance=..16]": {"sent": False, "reason": "No entity was found"}
+                }
+            )
+
+            bridge.handle_event(
+                {
+                    "type": "chat",
+                    "player": "alice",
+                    "message": "huan clear the nearby creepers",
+                    "raw": "<alice> huan clear the nearby creepers",
+                }
+            )
+
+            self.assertEqual(bridge.delivery.commands, ["kill @e[type=minecraft:creeper,distance=..16]"])
+            self.assertEqual(
+                bridge.delivery.sent,
+                ["Some commands did not finish cleanly, so try again or rephrase it."],
+            )
+            session = state.data["playerSessions"]["alice"]
+            self.assertFalse(session["lastCommandResults"][0]["ok"])
+            self.assertEqual(
+                session["lastReplyText"],
+                "Some commands did not finish cleanly, so try again or rephrase it.",
+            )
 
     def test_privileged_route_can_reply_privately_when_requested(self):
         config = self.make_config()

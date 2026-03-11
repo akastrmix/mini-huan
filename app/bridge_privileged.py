@@ -264,6 +264,7 @@ def parse_router_response(raw_text: str, *, player_auth: dict, active_session: d
             "private_requested": False,
             "chat_should_reply": None,
             "chat_reason": "",
+            "allow_followup_streak": False,
             "topic": "",
             "reason": "",
         }
@@ -284,6 +285,7 @@ def parse_router_response(raw_text: str, *, player_auth: dict, active_session: d
             "private_requested": False,
             "chat_should_reply": None,
             "chat_reason": "",
+            "allow_followup_streak": False,
             "topic": "",
             "reason": raw_text,
         }
@@ -315,11 +317,13 @@ def parse_router_response(raw_text: str, *, player_auth: dict, active_session: d
     has_chat_reason = "chat_reason" in parsed
     chat_should_reply = None
     chat_reason = ""
+    allow_followup_streak = False
     if has_chat_should_reply and has_chat_reason:
         chat_should_reply = bool(parsed.get("chat_should_reply", False))
         parsed_reason = str(parsed.get("chat_reason") or "").strip()
         if parsed_reason in ALLOWED_REASONS:
             chat_reason = parsed_reason
+            allow_followup_streak = bool(parsed.get("allow_followup_streak", False))
         else:
             chat_should_reply = None
 
@@ -332,6 +336,7 @@ def parse_router_response(raw_text: str, *, player_auth: dict, active_session: d
         "private_requested": bool(parsed.get("private_requested", False)),
         "chat_should_reply": chat_should_reply,
         "chat_reason": chat_reason,
+        "allow_followup_streak": allow_followup_streak,
         "topic": str(parsed.get("topic") or "").strip(),
         "reason": str(parsed.get("reason") or "").strip(),
     }
@@ -413,6 +418,7 @@ def local_router_fallback(context: dict, player_auth: dict, active_session: dict
             "confidence": 0.95,
             "enter_or_continue": "exit",
             "private_requested": private_requested,
+            "allow_followup_streak": False,
             "topic": "end active privileged session",
             "reason": "local router exit phrase",
         }
@@ -427,6 +433,7 @@ def local_router_fallback(context: dict, player_auth: dict, active_session: dict
                 "confidence": 0.92,
                 "enter_or_continue": "continue",
                 "private_requested": private_requested or bool((active_session or {}).get("private_requested", False)),
+                "allow_followup_streak": False,
                 "topic": str((active_session or {}).get("topic") or ""),
                 "reason": "local router continued active session",
             }
@@ -440,6 +447,7 @@ def local_router_fallback(context: dict, player_auth: dict, active_session: dict
             "confidence": 0.9,
             "enter_or_continue": "enter",
             "private_requested": private_requested,
+            "allow_followup_streak": False,
             "topic": "raw minecraft command",
             "reason": "local router raw command fallback",
         }
@@ -451,6 +459,7 @@ def local_router_fallback(context: dict, player_auth: dict, active_session: dict
         "confidence": 0.0,
         "enter_or_continue": "none",
         "private_requested": private_requested,
+        "allow_followup_streak": False,
         "topic": "",
         "reason": "local router generic chat fallback",
     }

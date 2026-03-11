@@ -91,10 +91,14 @@ Behavior notes:
 - Public reply is still the default; private reply only happens when the player explicitly asks for it
 - Privileged sessions are tracked per player, not globally
 - The router is now the main decider for both privileged mode selection and whether a routed `chat` turn should speak at all, including most refusal/limitation and permission-denied chat replies
+- When a routed turn stays in `chat`, the bridge no longer applies fallback-judge confidence thresholds on top of that main-path chat decision; it only enforces anti-spam/cooldown/streak gates
+- The bridge no longer precomputes `human_answer_seen`-style chat summaries; router and fallback judge should infer that directly from `recent_chat`
 - Live Minecraft state questions that require real command output should route through the prompt into `assist` or `command`, not stay in `chat`
 - `assist` and `command` now support a bridge-managed multi-step loop: helper returns commands, bridge executes them, helper receives actual results, then helper decides the next step or final reply
 - Same-player follow-up questions can reuse the stored active privileged session context even when the player does not rename the bot, and those follow-ups now stay on the router/helper path before judge fallback is considered
 - Same-player natural boundary continuations right after a recent refusal should also prefer the router-owned `chat` path before judge fallback is considered
+- The relaxed same-player streak cap now depends on an explicit helper continuation signal rather than bridge-local inference from reason labels plus recent chat ordering
+- Terminal privileged results should now include a non-empty player-facing reply from the helper; the bridge only uses generic fallback status/error text when that contract is missed
 - The bridge-local router fallback is now intentionally minimal: it mainly preserves active-session continuation, exit, and explicit raw command fallback after router failure
 - Continuation phrases such as `again`, `one more`, or `再来一组` can reuse the player's last successful privileged command context
 
@@ -146,15 +150,15 @@ Pitfalls:
   - How much of the newest tail is always kept before relevance scoring fills the rest
 - `contextMaxAgeSeconds`
   - Hard age cutoff applied to selected chat context, player history, and recent bot replies
-- `humanAnswerLookbackCount`
-  - How many recent entries to scan when estimating whether another player already answered
 
 ## Judge / anti-noise
 
 - `judgeConfidenceThreshold`
-  - Hard confidence pass threshold
+  - Hard confidence pass threshold for the fallback judge path
+  - Routed main-path `chat` decisions do not use this threshold
 - `judgeSoftThreshold`
-  - Lower threshold that only passes for the allowed soft-pass reasons
+  - Lower fallback-judge threshold that only passes when the helper explicitly returns the soft-pass flag for that fallback reply
+  - Routed main-path `chat` decisions do not use this threshold
 - `globalCooldownSeconds`
   - Global cooldown between replies
 - `playerCooldownSeconds`
@@ -162,9 +166,10 @@ Pitfalls:
 - `maxBotConsecutiveReplies`
   - Caps extended reply streaks; the streak resets when a player turn ends without a bot reply
 - `followupReplyWindowSeconds`
-  - If the same player was replied to within this many seconds and the recent chat still looks like an active bot exchange, a direct follow-up can use the relaxed same-player conversation cap, including short refusal/limitation replies
+  - If the same player was replied to within this many seconds and the router or fallback judge explicitly marks the new turn as continuing that exchange, the relaxed same-player conversation cap can apply, including short refusal/limitation replies
 - `maxSamePlayerConversationReplies`
   - Total consecutive replies allowed during a short same-player follow-up exchange before the normal streak gate starts blocking again
+  - This relaxed cap only applies when the helper explicitly returns the continuation flag for that turn
 - `botReplyStreakResetSeconds`
   - If the bot has been silent this long, the stored reply streak expires and the next chat turn starts fresh
 - `allowAppreciationReplies`
@@ -173,13 +178,14 @@ Pitfalls:
 Behavior note:
 - Direct asks that the bot cannot fulfill because of privacy, permissions/capabilities, or short-memory limits should usually still receive a short refusal/limitation reply; only clearly unsafe or non-directed content should stay silent
 - If a player clearly addresses the bot by `mini-huan`, `huan`, or the configured `displayNameZh`, or clearly continues a recent same-player bot exchange, the bridge should usually prefer replying over silently treating it as background chatter
-- On the main routed path, those public-chat reply/no-reply calls now come from the router first; the judge prompt mainly serves as a fallback gate instead of a second opinion on every privileged-capable turn
+- On the main routed path, those public-chat reply/no-reply calls now come from the router first; the judge prompt mainly serves as a fallback path, while the bridge only adds anti-spam/cooldown/streak enforcement instead of fallback-judge confidence gating
 - On that main routed path, refusal/limitation calls and permission-denied chat refusals should also normally come from the router rather than from bridge-local override logic
 - In that fallback judge path, the bridge no longer adds an extra public-chat signal suppression pass after the helper's judge response
 - That fallback judge path now mainly keeps minimal refusal/boundary continuity, rather than rescuing ordinary bot-directed chat that the router should have handled
 - If a helper-router `chat` route omits or invalidates the chat decision, the bridge now logs a router contract miss and falls back to judge instead of silently repairing it
 - The bridge itself no longer rewrites declined judge outputs into refusal/boundary replies
 - If the router omits or invalidates a permission-denied chat decision, the bridge now logs a router contract miss and falls back to judge instead of synthesizing its own `capability_refusal`
+- Relaxed same-player streak handling now depends on an explicit helper continuation signal; the bridge no longer infers continuation from reason labels plus recent chat ordering
 
 ## Runtime state sizing
 

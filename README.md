@@ -98,7 +98,7 @@ Mental model:
 - The bridge stores short-term context in runtime state
 - The router is the primary turn entrypoint for every chat turn
 - The router decides whether the turn stays in `chat` or enters/continues `assist`, `command`, or `full_agent`
-- On `chat` routes, the router now owns the main reply/no-reply call, including ordinary chat, refusal/limitation replies, and permission-denied chat refusals
+- On `chat` routes, the router now owns the main reply/no-reply call, including ordinary chat, refusal/limitation replies, and permission-denied chat refusals; the bridge only adds anti-spam/cooldown delivery gating on top of that main-path decision
 - The judge step remains as a lighter fallback path when routing is unavailable, skipped, or returns no usable chat decision
 - In that fallback path, the bridge no longer adds a second public-chat signal guard on top of the helper's judge output
 - That fallback judge path can still preserve minimal refusal/boundary continuity, but the bridge no longer locally rewrites declined judge outputs into those replies
@@ -107,7 +107,7 @@ Mental model:
 
 Fresh-session defaults:
 - Direct asks to `mini-huan`, `huan`, or the configured Chinese display name should usually get a reply
-- Same-player follow-ups stay relaxed only while recent chat still looks like an active bot exchange
+- Same-player follow-ups stay relaxed only when the router or fallback judge explicitly marks the turn as continuing the short same-player exchange, and the bridge's follow-up time window still matches
 - Privacy, capability, and short-memory limits should usually get a short refusal reply instead of silence, preferably from the router-owned main chat path
 - The helper owns identity; bridge prompts should stay focused on public-chat behavior
 
@@ -145,9 +145,9 @@ Minecraft latest.log
 - [full_agent_prompt.txt](/C:/Users/Administrator/.openclaw/workspace-mc-bridge/config/full_agent_prompt.txt)
   - fully authorized agent turns, including tools/computer work plus optional Minecraft commands
 - [bridge_context.py](/C:/Users/Administrator/.openclaw/workspace-mc-bridge/app/bridge_context.py)
-  - context scoring, player/bot history selection, and human-answer detection
+  - context scoring plus player/bot history selection for router, judge, reply, and privileged turns
 - [bridge_judge.py](/C:/Users/Administrator/.openclaw/workspace-mc-bridge/app/bridge_judge.py)
-  - fallback judge parsing and gating, plus same-player follow-up streak handling
+  - fallback judge parsing plus bridge-side anti-spam/cooldown gating for routed chat and fallback judge results
 - [bridge_privileged.py](/C:/Users/Administrator/.openclaw/workspace-mc-bridge/app/bridge_privileged.py)
   - permission resolution, routing parse, and privileged result parsing
 - [bridge_delivery.py](/C:/Users/Administrator/.openclaw/workspace-mc-bridge/app/bridge_delivery.py)
@@ -182,11 +182,10 @@ Current context sizing:
 - Judge window: `judgeRecentChatCount=20`, `judgePlayerHistoryCount=6`, `judgeRecentBotCount=4`
 - Reply window: `replyRecentChatCount=12`, `replyPlayerHistoryCount=5`, `replyRecentBotCount=3`
 - `contextMaxAgeSeconds=900`
-- `humanAnswerLookbackCount=8`
 
 Current thresholds:
-- Hard pass at `judgeConfidenceThreshold=0.72`
-- Soft pass at `judgeSoftThreshold=0.58` only for high-priority direct-address cases
+- Fallback judge hard pass at `judgeConfidenceThreshold=0.72`
+- Fallback judge soft pass at `judgeSoftThreshold=0.58` only when the helper explicitly marks the fallback reply as a soft-pass case
 
 Current cooldowns:
 - `globalCooldownSeconds=0`
@@ -195,7 +194,7 @@ Current cooldowns:
 Current anti-flood behavior:
 - Duplicate-event protection enabled
 - `maxBotConsecutiveReplies=4`
-- Same-player follow-ups within `followupReplyWindowSeconds=180` can continue only while recent chat still looks like an active bot exchange, up to `maxSamePlayerConversationReplies=20`
+- Same-player follow-ups within `followupReplyWindowSeconds=180` can continue only when the router or fallback judge explicitly marks the turn as a continuation, up to `maxSamePlayerConversationReplies=20`
 - `botReplyStreakResetSeconds=180`
 - Appreciation acknowledgments may consume one extra consecutive turn
 
@@ -225,9 +224,13 @@ Notes:
 - The bridge launches helper calls from `helperWorkspacePath`, but OpenClaw can still resume a previously stored session; if the resolved workspace or injected skills look wrong, inspect `runtime/last_invoke_debug.txt`
 - Public reply remains the default; private reply only happens when the player explicitly asks for it
 - The router prompt is now the primary decider for capability routing, whether a `chat` turn should get a public reply at all, and most refusal/limitation or permission-denied chat replies
+- Routed `chat` turns no longer use fallback-judge confidence thresholds on the main path; after the router decides to reply, the bridge only enforces anti-spam/cooldown/streak gates
+- The bridge no longer precomputes `human_answer_seen`-style chat summaries; router and fallback judge should infer that from raw `recent_chat`
 - The router prompt is responsible for detecting live Minecraft state queries that require command output; those should prefer `assist` or `command` instead of `chat`
 - `assist` and `command` now support a bridge-managed multi-step command loop, so the helper can probe live state, inspect real stdout, and then continue or summarize
 - Same-player follow-up questions right after a privileged result or recent refusal now stay on the router/helper path first, so they can reuse the stored privileged or conversational context even when the player does not repeat the bot's name
+- The relaxed same-player streak cap now depends on an explicit helper continuation signal rather than bridge-local inference from reason labels plus recent chat ordering
+- Terminal privileged results should now include a non-empty player-facing reply from the helper; the bridge only falls back to generic status/error text when that contract is missed
 
 ## Helper-local Planner
 
@@ -255,10 +258,11 @@ Behavior notes:
 - The helper-local planner is planner-first; the bridge still owns actual RCON delivery
 - `commandPlannerScriptPath` currently powers the local privileged execution fallback path; the main privileged path now prefers helper-driven routing plus the multi-step command protocol
 - The bridge-local router fallback is now intentionally minimal: it mainly preserves active-session continuation, exit, and explicit raw command fallback when the helper-side router fails
-- On the main path, routed `chat` turns no longer immediately go through a second should-reply pass in judge; the router owns that decision unless it omits or invalidates the chat decision or routing falls back
+- On the main path, routed `chat` turns no longer go through fallback-judge confidence thresholds or a second should-reply pass; the router owns that decision unless it omits or invalidates the chat decision or routing falls back
 - If a helper-router `chat` route omits or invalidates the chat decision, the bridge logs a router contract miss and falls back to judge instead of silently repairing it
 - If the router reports a permission denial and also provides chat decision fields, the bridge now respects that router-owned refusal path directly
 - If the router reports a permission denial but omits or invalidates the chat decision, the bridge now logs a router contract miss and falls back to judge instead of synthesizing its own refusal
+- Same-player relaxed streak handling now depends on an explicit helper continuation signal; the bridge no longer infers continuation from reason labels plus recent chat ordering
 - Follow-up shorthand like `again`, `one more`, or `再来一组` is resolved using per-player last successful privileged execution context
 - If the privileged helper route errors, the bridge can still fall back to the helper-local planner script
 - In the main helper path, the bridge now returns actual command stdout/error results back to the helper between `assist`/`command` steps

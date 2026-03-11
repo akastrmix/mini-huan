@@ -462,6 +462,7 @@ class MCAIBridge:
             reason=str(route.get("chat_reason") or ""),
             target_player=str(event.get("player") or ""),
             topic=str(route.get("topic") or ""),
+            allow_followup_streak=bool(route.get("allow_followup_streak", False)),
         )
 
     def run_privileged_stage(
@@ -622,23 +623,44 @@ class MCAIBridge:
             last_command_results = list((command_history[-1] or {}).get("results") or [])
 
         session_topic = str(execution.get("topic") or route.get("topic") or "")
+        status = str(execution.get("status") or "")
         reply = str(execution.get("reply") or "").strip()
-        if commands and last_command_results and any(not bool(item.get("ok", False)) for item in last_command_results):
+        command_failures_present = bool(
+            last_command_results and any(not bool(item.get("ok", False)) for item in last_command_results)
+        )
+        if command_failures_present:
             reply = ""
         if not reply:
-            if execution.get("status") == "completed" and commands:
+            if status in {"completed", "denied", "needs_clarification"}:
+                self.logger.emit(
+                    {
+                        "bridge": "privileged_contract_miss",
+                        "event": event,
+                        "route": route,
+                        "result": execution,
+                        "reason": "missing player-facing reply for terminal privileged status",
+                        "command_failures_present": command_failures_present,
+                    }
+                )
+            if command_failures_present:
+                reply = self.fallback_text(
+                    event,
+                    chinese="这次有命令没有顺利完成，你可以再说一次或换个说法。",
+                    english="Some commands did not finish cleanly, so try again or rephrase it.",
+                )
+            elif status == "completed" and commands:
                 reply = self.fallback_text(
                     event,
                     chinese="好了。",
                     english="Done.",
                 )
-            elif execution.get("status") == "needs_clarification":
+            elif status == "needs_clarification":
                 reply = self.fallback_text(
                     event,
                     chinese="你再具体说一点，我再帮你做。",
                     english="Give me a bit more detail and I can do that.",
                 )
-            elif execution.get("status") == "denied":
+            elif status == "denied":
                 reply = self.fallback_text(
                     event,
                     chinese="这个我不方便直接帮你做。",
@@ -758,7 +780,7 @@ class MCAIBridge:
                         return
                 if self.route_chat_decision_available(route):
                     decision = self.decision_from_router_chat(event, route)
-                    passed, gate_reason = self.judge.gate(event, decision)
+                    passed, gate_reason = self.judge.gate_router_chat(event, decision)
                     self.logger.emit(
                         {
                             "bridge": "router_chat",

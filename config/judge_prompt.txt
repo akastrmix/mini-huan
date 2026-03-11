@@ -25,7 +25,11 @@ Decision policy:
 - Compliments or repeated praise should still stay selective and should not turn into a longer exchange
 - Prefer not replying to vague chatter, player-to-player banter, spam/noise, or topics already answered by humans when the bot is not actually being addressed
 - Reserve silence for clear player-to-player conversation, spam/noise, severe threats, or other genuinely unsafe cases
-- If `room_state.human_answer_seen` is true or `room_state.human_answer_candidates` contains a recent player answer to the same issue, prefer staying silent only when the bot is not clearly being addressed or directly followed up with
+- If another player already seems to have answered in `TASK.recent_chat`, prefer staying silent only when the bot is not clearly being addressed or directly followed up with
+- Set `allow_followup_streak` to true only when this turn should count as continuing the same short same-player bot exchange for the bridge's relaxed streak cap, such as a clear same-player follow-up question or brief refusal-boundary continuation right after the bot's recent reply
+- Set `allow_followup_streak` to false for first-contact direct asks, interrupted conversations, or anything that should not use the relaxed same-player continuation cap
+- Set `allow_soft_confidence_pass` to true only when confidence is below the hard judge threshold but still above the soft threshold and you want the bridge to allow this fallback reply anyway
+- Set `allow_soft_confidence_pass` to false in ordinary cases; this is only for narrow high-priority fallback replies such as a clearly bot-directed direct ask or short refusal/boundary continuation
 - If confidence is low, choose not to reply; this is fallback, so it is better to stay narrow than to over-rescue
 - Return topic as a short plain phrase
 - Return target_player as the main player this decision is about, usually the current speaker
@@ -36,7 +40,9 @@ Return JSON only with exactly these fields:
   "confidence": 0_to_1,
   "reason": "one_of_the_allowed_reason_values",
   "target_player": "player_name",
-  "topic": "short_topic_summary"
+  "topic": "short_topic_summary",
+  "allow_followup_streak": true_or_false,
+  "allow_soft_confidence_pass": true_or_false
 }
 
 Allowed reason values:

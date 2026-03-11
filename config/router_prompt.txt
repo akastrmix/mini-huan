@@ -40,10 +40,11 @@ Routing policy:
 `chat` reply policy:
 - For `chat`, you are also deciding whether the bot should speak in public chat at all
 - Treat this as the main should-reply decision on the normal path; do not assume a separate judge will fix it later
+- You are also deciding whether this turn should count as continuing a short same-player bot exchange for the bridge's anti-spam streak gate
 - If the player clearly addresses the bot by name or alias, directly asks the bot a question, greets the bot, or clearly continues a recent same-player bot exchange, usually set `chat_should_reply` to true
 - If `TASK.active_session` exists for the same player and the message looks like a reaction, follow-up question, or request for explanation about that recent result, usually set `chat_should_reply` to true even if the player does not repeat the bot's name
 - On first contact, broad room-chat questions or brainstorming without the bot's name are usually not enough; prefer `chat_should_reply` false
-- If `TASK.room_state.human_answer_seen` is true, prefer silence only when the bot is not clearly being addressed or directly followed up with
+- If another player already seems to have answered in `TASK.recent_chat`, prefer silence only when the bot is not clearly being addressed or directly followed up with
 - Prefer silence for obvious player-to-player chatter, spam/noise, or clearly unsafe content
 - Handle privacy, capability, and memory-limit refusals on this main path instead of leaving them for fallback judge
 - If the player directly asks for something the bot should refuse because of privacy, capability, or memory limits, prefer `chat_should_reply` true with the matching refusal-style `chat_reason` instead of silence
@@ -51,14 +52,18 @@ Routing policy:
 - For that refusal-boundary continuation, use `followup_to_bot_conversation` when the turn is mainly continuing the recent exchange; use the matching refusal reason when the player is essentially repeating the same prohibited ask
 - Severe threats, obvious harassment, or spam after a refusal should still prefer silence or `unsafe_or_out_of_scope`, not a longer argument
 - If the player is explicitly stopping the active privileged session, usually set `chat_should_reply` false unless they also ask a separate chat question
+- Set `allow_followup_streak` to true only when this turn should count as continuing the same short same-player bot exchange for anti-spam purposes, such as a clear same-player follow-up question, explanation request, or brief refusal-boundary continuation right after the bot's recent reply
+- Set `allow_followup_streak` to false for first-contact direct asks, generic offers, interrupted conversations, or anything that should not consume the relaxed same-player continuation cap
 
 When `mode` is `chat`:
 - Set `chat_should_reply` to true or false
 - Set `chat_reason` to one of the allowed reason values below
+- Set `allow_followup_streak` to true or false
 
 When `mode` is not `chat`:
 - Set `chat_should_reply` to false
 - Set `chat_reason` to an empty string
+- Set `allow_followup_streak` to false
 
 Allowed `chat_reason` values:
 - `direct_question_to_bot`
@@ -89,6 +94,7 @@ Return JSON only with exactly these fields:
   "private_requested": true_or_false,
   "chat_should_reply": true_or_false,
   "chat_reason": "allowed_reason_or_empty_string",
+  "allow_followup_streak": true_or_false,
   "topic": "short phrase",
   "reason": "short reason"
 }

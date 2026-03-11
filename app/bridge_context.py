@@ -6,18 +6,8 @@ import time
 
 from bridge_logging import Logger
 from bridge_shared import (
-    ANSWER_HINTS,
     CJK_RE,
-    EN_CONTENT_STOPWORDS,
-    EXPLICIT_ANSWER_START_HINTS_ZH,
-    EXPLICIT_ANSWER_START_RE,
-    QUESTION_HINTS_ZH,
-    QUESTION_START_RE,
-    SHORT_YES_NO_ANSWER_RE,
     WORD_RE,
-    YES_NO_QUESTION_HINTS_ZH,
-    YES_NO_START_RE,
-    ZH_CONTENT_STOPWORDS,
 )
 from bridge_state import BridgeState, active_bot_reply_streak
 
@@ -36,9 +26,6 @@ class ContextBuilder:
                 continue
             tokens.update(chunk[idx: idx + 2] for idx in range(len(chunk) - 1))
         return tokens
-
-    def text_contains_any(self, text: str, phrases):
-        return any(phrase and phrase in text for phrase in phrases)
 
     def bot_name_alias_tokens(self):
         aliases = set()
@@ -92,101 +79,6 @@ class ContextBuilder:
             "last_command_results": list(active_session.get("last_command_results") or []),
             "last_reply_text": str(active_session.get("last_reply_text") or ""),
         }
-
-    def content_tokens(self, text: str, *, current_player: str = ""):
-        tokens = set(self.tokenize_text(text))
-        stop_tokens = set(EN_CONTENT_STOPWORDS)
-        stop_tokens.update(ZH_CONTENT_STOPWORDS)
-        stop_tokens.update(self.bot_name_alias_tokens())
-        if current_player:
-            stop_tokens.update(self.tokenize_text(current_player.lower()))
-        return {token for token in tokens if token and token not in stop_tokens}
-
-    def message_has_question_signal(self, text: str):
-        text = text or ""
-        lower_text = text.lower()
-        return (
-            any(ch in text for ch in ("?", "\uff1f"))
-            or bool(QUESTION_START_RE.search(lower_text))
-            or self.text_contains_any(text, QUESTION_HINTS_ZH)
-        )
-
-    def is_yes_no_question(self, text: str):
-        text = text or ""
-        return bool(YES_NO_START_RE.search(text.lower())) or self.text_contains_any(text, YES_NO_QUESTION_HINTS_ZH)
-
-    def looks_like_answer_form(self, text: str):
-        text = text or ""
-        lower_text = text.lower()
-        stripped = text.strip()
-        return (
-            stripped.startswith("/")
-            or bool(SHORT_YES_NO_ANSWER_RE.match(stripped))
-            or bool(EXPLICIT_ANSWER_START_RE.search(lower_text))
-            or self.text_contains_any(text, EXPLICIT_ANSWER_START_HINTS_ZH)
-            or any(hint in lower_text for hint in ANSWER_HINTS)
-        )
-
-    def score_human_answer_candidate(
-        self,
-        *,
-        current_message: str,
-        current_tokens: set[str],
-        focus_tokens: set[str],
-        candidate_text: str,
-        context_bonus: float = 0.0,
-    ):
-        candidate_tokens = self.tokenize_text(candidate_text)
-        focus_overlap = len(focus_tokens & candidate_tokens)
-        broad_overlap = len(current_tokens & candidate_tokens)
-        looks_like_answer = self.looks_like_answer_form(candidate_text)
-        pure_question = self.message_has_question_signal(candidate_text) and not looks_like_answer
-        score = 0.0
-
-        if focus_overlap:
-            score += min(4.0, focus_overlap * 2.0)
-        elif broad_overlap >= 2:
-            score += min(2.0, float(broad_overlap))
-        if looks_like_answer:
-            score += 2.0
-        if self.is_yes_no_question(current_message) and SHORT_YES_NO_ANSWER_RE.match(candidate_text.strip()):
-            score += 3.0
-        if len(candidate_text.strip()) >= 10:
-            score += 0.5
-        if re.search(r"\d", candidate_text) and (re.search(r"\d", current_message) or any(op in current_message for op in "+-*/=")):
-            score += 1.5
-        if pure_question:
-            score -= 2.5
-        score += context_bonus
-        return score
-
-    def prior_same_player_question_context_bonus(
-        self,
-        entries: list[dict],
-        candidate_idx: int,
-        *,
-        current_player: str,
-        current_message: str,
-        current_tokens: set[str],
-        focus_tokens: set[str],
-    ):
-        start_idx = max(0, candidate_idx - 3)
-        for prev_entry in reversed(entries[start_idx:candidate_idx]):
-            if str(prev_entry.get("type") or "player") != "player":
-                continue
-            if str(prev_entry.get("speaker") or "") != current_player:
-                continue
-            prev_text = str(prev_entry.get("text") or "")
-            if not self.message_has_question_signal(prev_text):
-                continue
-            if prev_text.strip().lower() == current_message.strip().lower():
-                return 2.0
-            prev_focus_tokens = self.content_tokens(prev_text, current_player=current_player)
-            if prev_focus_tokens & focus_tokens:
-                return 1.5
-            if len(self.tokenize_text(prev_text) & current_tokens) >= 2:
-                return 1.5
-        return 0.0
 
     def within_context_age(self, timestamp: float | None, *, now: float | None = None):
         max_age = int(self.config.get("contextMaxAgeSeconds", 900))
@@ -328,59 +220,11 @@ class ContextBuilder:
             for item in entries[-count:]
         ]
 
-    def human_answer_candidates(self, current_player: str, current_message: str, *, max_candidates: int = 2):
-        candidates = self.context_candidates()
-        if not candidates:
-            return []
-        if not self.message_has_question_signal(current_message):
-            return []
-        now = time.time()
-        current_tokens = self.tokenize_text(current_message)
-        focus_tokens = self.content_tokens(current_message, current_player=current_player)
-        lookback = int(self.config.get("humanAnswerLookbackCount", 8))
-        selected = []
-        scoped_candidates = candidates[-lookback:]
-        for idx in range(len(scoped_candidates) - 1, -1, -1):
-            entry = scoped_candidates[idx]
-            speaker = str(entry.get("speaker") or "")
-            text = str(entry.get("text") or "")
-            if str(entry.get("type") or "player") != "player" or not speaker or speaker == current_player:
-                continue
-            context_bonus = self.prior_same_player_question_context_bonus(
-                scoped_candidates,
-                idx,
-                current_player=current_player,
-                current_message=current_message,
-                current_tokens=current_tokens,
-                focus_tokens=focus_tokens,
-            )
-            score = self.score_human_answer_candidate(
-                current_message=current_message,
-                current_tokens=current_tokens,
-                focus_tokens=focus_tokens,
-                candidate_text=text,
-                context_bonus=context_bonus,
-            )
-            if score < 3.0:
-                continue
-            selected.append({
-                "speaker": speaker,
-                "text": text,
-                "seconds_ago": max(0, int(now - float(entry.get("timestamp", now)))),
-            })
-            if len(selected) >= max_candidates:
-                break
-        return list(reversed(selected))
-
-    def detect_human_answer_seen(self, current_player: str, current_message: str):
-        return bool(self.human_answer_candidates(current_player, current_message))
-
     def build_judge_context(self, event: dict, active_session: dict | None = None):
         player = str(event.get("player") or "")
         message = str(event.get("message") or "")
         now = time.time()
         last_global = float(self.state.data.get("lastGlobalReplyTs", 0.0))
-        human_answers = self.human_answer_candidates(player, message)
         return {
             "bot_profile": self.bot_profile(),
             "current_message": {
@@ -395,8 +239,6 @@ class ContextBuilder:
             "room_state": {
                 "seconds_since_bot_last_reply": None if last_global <= 0 else max(0, int(now - last_global)),
                 "bot_consecutive_reply_count": active_bot_reply_streak(self.config, self.state, now=now),
-                "human_answer_seen": bool(human_answers),
-                "human_answer_candidates": human_answers,
             },
         }
 
@@ -435,7 +277,6 @@ class ContextBuilder:
         message = str(event.get("message") or "")
         now = time.time()
         last_global = float(self.state.data.get("lastGlobalReplyTs", 0.0))
-        human_answers = self.human_answer_candidates(player, message)
         return {
             "bot_profile": self.bot_profile(),
             "player_auth": dict(player_auth or {}),
@@ -451,8 +292,6 @@ class ContextBuilder:
             "room_state": {
                 "seconds_since_bot_last_reply": None if last_global <= 0 else max(0, int(now - last_global)),
                 "bot_consecutive_reply_count": active_bot_reply_streak(self.config, self.state, now=now),
-                "human_answer_seen": bool(human_answers),
-                "human_answer_candidates": human_answers,
             },
         }
 

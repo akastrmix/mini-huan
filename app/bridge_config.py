@@ -72,7 +72,6 @@ def default_config():
         "replyRecentBotCount": 3,
         "contextRecentTailReserve": 8,
         "contextMaxAgeSeconds": 900,
-        "humanAnswerLookbackCount": 8,
         "judgeConfidenceThreshold": 0.72,
         "judgeSoftThreshold": 0.58,
         "maxBotConsecutiveReplies": 4,
