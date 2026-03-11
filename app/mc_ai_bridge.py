@@ -140,7 +140,7 @@ class MCAIBridge:
         )
 
     def should_attempt_router(self, player_auth: dict, active_session: dict | None):
-        return bool(active_session) or str((player_auth or {}).get("max_mode") or MODE_CHAT) != MODE_CHAT
+        return True
 
     def run_router_stage(self, event: dict, player_auth: dict, active_session: dict | None):
         router_context = self.context.build_router_context(event, player_auth, active_session)
@@ -177,7 +177,6 @@ class MCAIBridge:
             )
             decision = self.judge.parse(judge_text, event)
             decision = self.judge.maybe_override_decline(event, decision, judge_context)
-            decision = self.judge.apply_public_chat_guard(event, decision, judge_context)
         except Exception as exc:
             self.logger.emit({"bridge": "error", "stage": "judge", "error": str(exc), "event": event}, error=False)
             return None, None, "judge_error"
@@ -464,6 +463,23 @@ class MCAIBridge:
         if reply_status != "ok":
             return False
         return self.finalize_reply(event, decision, reply)
+
+    def route_chat_decision_available(self, route: dict | None):
+        if not route:
+            return False
+        if str(route.get("mode") or "") != MODE_CHAT:
+            return False
+        return route.get("chat_should_reply") is not None
+
+    def decision_from_router_chat(self, event: dict, route: dict):
+        return self.judge.normalize_decision(
+            event,
+            should_reply=bool(route.get("chat_should_reply", False)),
+            confidence=route.get("confidence", 0.0),
+            reason=str(route.get("chat_reason") or ""),
+            target_player=str(event.get("player") or ""),
+            topic=str(route.get("topic") or ""),
+        )
 
     def run_privileged_stage(
         self,
@@ -761,6 +777,31 @@ class MCAIBridge:
                         ):
                             self.mark_turn_without_reply()
                         return
+                if self.route_chat_decision_available(route):
+                    decision = self.decision_from_router_chat(event, route)
+                    passed, gate_reason = self.judge.gate(event, decision)
+                    self.logger.emit(
+                        {
+                            "bridge": "router_chat",
+                            "event": event,
+                            "route": route,
+                            "decision": decision,
+                            "gate": {"passed": passed, "why": gate_reason},
+                        }
+                    )
+                    self.emit_summary(event, "router_chat", decision, gate_reason)
+                    if not passed:
+                        self.mark_turn_without_reply()
+                        return
+
+                    reply, _raw, reply_status = self.run_reply_stage(event, decision, active_session)
+                    if reply_status != "ok":
+                        self.mark_turn_without_reply()
+                        return
+
+                    if not self.finalize_reply(event, decision, reply):
+                        self.mark_turn_without_reply()
+                    return
 
         decision, _judge_context, judge_status = self.run_judge_stage(event, active_session)
         if judge_status != "passed":

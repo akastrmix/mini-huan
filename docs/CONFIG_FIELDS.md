@@ -15,9 +15,9 @@ This file explains the fields in `bridge_config.json` as the bridge works today.
 - `promptPath`
   - Reply-stage prompt file
 - `judgePromptPath`
-  - Judge-stage prompt file
+  - Fallback judge-stage prompt file used when the primary router path is unavailable, skipped, or does not return an explicit chat decision
 - `routerPromptPath`
-  - Natural-language capability routing prompt file
+  - Primary turn-orchestration prompt file for capability routing plus main-path `chat` reply/no-reply decisions
 - `assistPromptPath`
   - Privileged in-game assist prompt file
 - `commandPromptPath`
@@ -87,13 +87,14 @@ Mode meanings:
   - full OpenClaw-style agent work with tools/computer control plus optional Minecraft commands
 
 Behavior notes:
-- Privileged routing is only attempted for players whose configured `max_mode` is above `chat`, or who already have an active privileged session
+- Every chat turn now enters the router first; player auth and active-session state only decide whether the router can stay in `chat` or escalate above it
 - Public reply is still the default; private reply only happens when the player explicitly asks for it
 - Privileged sessions are tracked per player, not globally
+- The router is now the main decider for both privileged mode selection and whether a routed `chat` turn should speak at all
 - Live Minecraft state questions that require real command output should route through the prompt into `assist` or `command`, not stay in `chat`
 - `assist` and `command` now support a bridge-managed multi-step loop: helper returns commands, bridge executes them, helper receives actual results, then helper decides the next step or final reply
-- Same-player follow-up questions can reuse the stored active privileged session context even when the player does not rename the bot
-- The bridge-local router fallback still contains some keyword-based heuristics for `assist`, `command`, and `full_agent`; routing is not yet fully delegated to helper-side command reasoning
+- Same-player follow-up questions can reuse the stored active privileged session context even when the player does not rename the bot, and those follow-ups now stay on the router/helper path before judge fallback is considered
+- The bridge-local router fallback is now intentionally minimal: it mainly preserves active-session continuation, exit, and explicit raw command fallback after router failure
 - Continuation phrases such as `again`, `one more`, or `再来一组` can reuse the player's last successful privileged command context
 
 ## Helper-local planner wiring
@@ -113,7 +114,7 @@ Pitfalls:
 - If you rename or move the helper-local planner skill without updating `commandPlannerScriptPath`, privileged fallback planning will silently stop working
 - If you move the helper-local skill directory without updating `skills.load.extraDirs`, the skill may disappear from the Control UI and runtime skill list
 - If OpenClaw resumes a stored session outside `helperWorkspacePath`, the helper-side skill summary and injected workspace files may not match the bridge's intended helper workspace
-- If you assume `commandPlannerScriptPath` controls all privileged routing decisions, you may miss that the bridge-local router fallback still makes some keyword-based mode choices before helper execution fallback kicks in
+- If you assume `commandPlannerScriptPath` controls all privileged routing decisions, you may miss that the router prompt owns the main path, while the bridge-local router fallback only keeps minimal continuity and raw-command behavior after router failure
 - If you change the multi-step command protocol shape in prompts or code, keep the bridge-side protocol payload and helper expectations in sync
 - Do not duplicate the planner path in multiple prompt or doc files; keep the path authoritative in `bridge_config.json`
 
@@ -171,6 +172,9 @@ Pitfalls:
 Behavior note:
 - Direct asks that the bot cannot fulfill because of privacy, permissions/capabilities, or short-memory limits should usually still receive a short refusal/limitation reply; only clearly unsafe or non-directed content should stay silent
 - If a player clearly addresses the bot by `mini-huan`, `huan`, or the configured `displayNameZh`, or clearly continues a recent same-player bot exchange, the bridge should usually prefer replying over silently treating it as background chatter
+- On the main routed path, those public-chat reply/no-reply calls now come from the router first; the judge prompt mainly serves as a fallback gate instead of a second opinion on every privileged-capable turn
+- In that fallback judge path, the bridge no longer adds an extra public-chat signal suppression pass after the helper's judge response
+- That fallback judge path now mainly keeps refusal/boundary continuity, rather than rescuing ordinary bot-directed chat that the router should have handled
 
 ## Runtime state sizing
 

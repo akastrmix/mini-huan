@@ -434,6 +434,8 @@ class ContextBuilder:
         player = str(event.get("player") or "")
         message = str(event.get("message") or "")
         now = time.time()
+        last_global = float(self.state.data.get("lastGlobalReplyTs", 0.0))
+        human_answers = self.human_answer_candidates(player, message)
         return {
             "bot_profile": self.bot_profile(),
             "player_auth": dict(player_auth or {}),
@@ -446,6 +448,12 @@ class ContextBuilder:
             "recent_chat": self.select_recent_chat("judgeRecentChatCount", 10, player, message),
             "recent_bot_messages": self.recent_bot_messages("judgeRecentBotCount", 2),
             "player_recent_messages": self.player_history(player, "judgePlayerHistoryCount", 3),
+            "room_state": {
+                "seconds_since_bot_last_reply": None if last_global <= 0 else max(0, int(now - last_global)),
+                "bot_consecutive_reply_count": active_bot_reply_streak(self.config, self.state, now=now),
+                "human_answer_seen": bool(human_answers),
+                "human_answer_candidates": human_answers,
+            },
         }
 
     def build_privileged_context(

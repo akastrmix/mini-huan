@@ -17,15 +17,37 @@ FIXTURE_PATH = Path(__file__).resolve().parent / "fixtures" / "chat_replays.json
 
 
 class FixtureInvoker:
-    def __init__(self, *, judge_response: dict, reply_text: str | None = None):
+    def __init__(self, *, judge_response: dict, reply_text: str | None = None, router_response: dict | None = None):
         self.calls = []
+        self.router_response = dict(router_response or {})
         self.responses = [
             (json.dumps(judge_response, ensure_ascii=False), {}),
         ]
         if reply_text is not None:
             self.responses.append((reply_text, {"reply": reply_text}))
 
+    def _is_router_prompt(self, prompt_path):
+        return "router_prompt.txt" in str(prompt_path)
+
+    def _synthetic_router_fallback_response(self):
+        if self.router_response:
+            return json.dumps(self.router_response, ensure_ascii=False), {}
+        return json.dumps({
+            "mode": "chat",
+            "requested_mode": "chat",
+            "denied_by_permission": False,
+            "confidence": 0.0,
+            "enter_or_continue": "none",
+            "private_requested": False,
+            "topic": "",
+            "reason": "synthetic fixture router fallback",
+        }), {}
+
     def call_prompt(self, payload, prompt_path):
+        if self._is_router_prompt(prompt_path):
+            if self.router_response:
+                self.calls.append({"payload": payload, "prompt_path": prompt_path})
+            return self._synthetic_router_fallback_response()
         self.calls.append({"payload": payload, "prompt_path": prompt_path})
         if not self.responses:
             raise AssertionError("No fixture responses left for call_prompt")
@@ -120,6 +142,7 @@ class ChatReplayTests(unittest.TestCase):
                     invoker = FixtureInvoker(
                         judge_response=dict(case["judge_response"]),
                         reply_text=case.get("reply_text"),
+                        router_response=case.get("router_response"),
                     )
                     delivery = StubDelivery()
                     bridge.invoker = invoker

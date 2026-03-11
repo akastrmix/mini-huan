@@ -20,7 +20,6 @@ from bridge_shared import (
     MILD_PRESSURE_MARKERS,
     PRIVATE_REQUEST_MARKERS,
     PRIVATE_REQUEST_MARKERS_ZH,
-    PROACTIVE_DIRECT_OVERRIDE_BLOCK_REASONS,
     QUESTION_HINTS_ZH,
     QUESTION_START_RE,
     SEVERE_THREAT_MARKERS,
@@ -33,6 +32,31 @@ class JudgePipeline:
     def __init__(self, config: dict, state: BridgeState):
         self.config = config
         self.state = state
+
+    def normalize_decision(
+        self,
+        event: dict,
+        *,
+        should_reply: bool,
+        confidence: float,
+        reason: str,
+        topic: str,
+        target_player: str | None = None,
+    ):
+        normalized_reason = str(reason or "not_addressed_to_bot")
+        if normalized_reason not in ALLOWED_REASONS:
+            normalized_reason = "not_addressed_to_bot"
+        try:
+            normalized_confidence = float(confidence)
+        except (TypeError, ValueError):
+            normalized_confidence = 0.0
+        return {
+            "should_reply": bool(should_reply),
+            "confidence": max(0.0, min(1.0, normalized_confidence)),
+            "reason": normalized_reason,
+            "target_player": str(target_player or event.get("player") or ""),
+            "topic": str(topic or "").strip(),
+        }
 
     def text_contains_markers(self, message: str, english_markers, *, zh_markers=()):
         lower_text = (message or "").lower()
@@ -155,84 +179,12 @@ class JudgePipeline:
             return ("capability_refusal", "permission or command request")
         return None
 
-    def classify_proactive_direct_override(self, event: dict, decision: dict, judge_context: dict):
-        reason = str(decision.get("reason") or "")
-        if reason in PROACTIVE_DIRECT_OVERRIDE_BLOCK_REASONS:
-            return None
-        message = str(event.get("message") or "")
-        lower_text = message.lower()
-        if any(marker in lower_text for marker in SEVERE_THREAT_MARKERS):
-            return None
-        named = self.message_mentions_bot_name(message, judge_context)
-        direct_request = self.has_direct_request_shape_for_override(message)
-        followup = direct_request and self.recent_same_player_bot_exchange(
-            str(event.get("player") or ""),
-            min_window=30.0,
-        )
-        if not named and not followup:
-            return None
-        if followup and not named:
-            return ("followup_to_bot_conversation", "same-player follow-up question")
-        if direct_request:
-            return ("direct_question_to_bot", "direct player question")
-        return ("direct_address_to_bot", "direct address to bot")
-
-    def decision_has_public_chat_signal(self, event: dict, decision: dict, judge_context: dict):
-        message = str(event.get("message") or "")
-        player = str(event.get("player") or "")
-        reason = str(decision.get("reason") or "")
-        named = self.message_mentions_bot_name(message, judge_context)
-        if named:
-            return True
-
-        followup = self.recent_same_player_bot_exchange(player, min_window=30.0)
-        direct_request = self.has_direct_request_shape_for_override(message)
-        mild_pressure = self.looks_like_mild_pressure_after_refusal(message)
-
-        if reason in {"direct_address_to_bot", "greeting_to_bot"}:
-            return False
-        if reason == "appreciation_after_bot_reply":
-            return followup
-        if reason == "followup_to_bot_conversation":
-            return followup and (direct_request or mild_pressure)
-        if reason in {
-            "direct_question_to_bot",
-            "help_request",
-            "privacy_refusal",
-            "capability_refusal",
-            "memory_limit_refusal",
-            "server_assistant_relevant",
-        }:
-            return followup and direct_request
-        return followup and (direct_request or mild_pressure)
-
-    def apply_public_chat_guard(self, event: dict, decision: dict, judge_context: dict):
-        if not decision.get("should_reply"):
-            return decision
-        if self.decision_has_public_chat_signal(event, decision, judge_context):
-            return decision
-        updated = dict(decision)
-        updated["should_reply"] = False
-        updated["confidence"] = min(float(updated.get("confidence", 0.0)), 0.35)
-        updated["reason"] = "not_addressed_to_bot"
-        updated["topic"] = "missing explicit bot signal"
-        return updated
-
     def maybe_override_decline(self, event: dict, decision: dict, judge_context: dict):
         if decision.get("should_reply"):
             return decision
         refusal_override = self.classify_refusal_override(event, judge_context)
         if refusal_override is not None:
             override_reason, override_topic = refusal_override
-            updated = dict(decision)
-            updated["should_reply"] = True
-            updated["confidence"] = max(float(updated.get("confidence", 0.0)), 0.84)
-            updated["reason"] = override_reason
-            updated["topic"] = override_topic
-            return updated
-        direct_override = self.classify_proactive_direct_override(event, decision, judge_context)
-        if direct_override is not None:
-            override_reason, override_topic = direct_override
             updated = dict(decision)
             updated["should_reply"] = True
             updated["confidence"] = max(float(updated.get("confidence", 0.0)), 0.84)
@@ -262,38 +214,33 @@ class JudgePipeline:
         default_reason = "not_addressed_to_bot"
         raw_text = (raw_text or "").strip()
         if not raw_text:
-            return {
-                "should_reply": False,
-                "confidence": 0.0,
-                "reason": default_reason,
-                "target_player": event.get("player") or "",
-                "topic": "",
-            }
+            return self.normalize_decision(
+                event,
+                should_reply=False,
+                confidence=0.0,
+                reason=default_reason,
+                topic="",
+            )
         try:
             parsed = json.loads(raw_text)
         except json.JSONDecodeError:
-            return {
-                "should_reply": False,
-                "confidence": 0.0,
-                "reason": default_reason,
-                "target_player": event.get("player") or "",
-                "topic": "",
-                "raw": raw_text,
-            }
-        reason = str(parsed.get("reason") or default_reason)
-        if reason not in ALLOWED_REASONS:
-            reason = default_reason
-        try:
-            confidence = float(parsed.get("confidence", 0.0))
-        except (TypeError, ValueError):
-            confidence = 0.0
-        return {
-            "should_reply": bool(parsed.get("should_reply", False)),
-            "confidence": max(0.0, min(1.0, confidence)),
-            "reason": reason,
-            "target_player": str(parsed.get("target_player") or event.get("player") or ""),
-            "topic": str(parsed.get("topic") or "").strip(),
-        }
+            decision = self.normalize_decision(
+                event,
+                should_reply=False,
+                confidence=0.0,
+                reason=default_reason,
+                topic="",
+            )
+            decision["raw"] = raw_text
+            return decision
+        return self.normalize_decision(
+            event,
+            should_reply=bool(parsed.get("should_reply", False)),
+            confidence=parsed.get("confidence", 0.0),
+            reason=str(parsed.get("reason") or default_reason),
+            target_player=str(parsed.get("target_player") or event.get("player") or ""),
+            topic=str(parsed.get("topic") or "").strip(),
+        )
 
     def gate(self, event: dict, decision: dict):
         if not decision.get("should_reply"):

@@ -6,6 +6,7 @@ import re
 import subprocess
 
 from bridge_shared import (
+    ALLOWED_REASONS,
     DEFAULT_MODE_SESSION_WINDOWS,
     DEFAULT_ROUTER_CONFIDENCE_THRESHOLD,
     MODE_ASSIST,
@@ -261,6 +262,8 @@ def parse_router_response(raw_text: str, *, player_auth: dict, active_session: d
             "confidence": 0.0,
             "enter_or_continue": "none",
             "private_requested": False,
+            "chat_should_reply": None,
+            "chat_reason": "",
             "topic": "",
             "reason": "",
         }
@@ -279,6 +282,8 @@ def parse_router_response(raw_text: str, *, player_auth: dict, active_session: d
             "confidence": 0.0,
             "enter_or_continue": "none",
             "private_requested": False,
+            "chat_should_reply": None,
+            "chat_reason": "",
             "topic": "",
             "reason": raw_text,
         }
@@ -306,6 +311,17 @@ def parse_router_response(raw_text: str, *, player_auth: dict, active_session: d
     if allowed_mode not in PRIVILEGED_MODES and action in {"enter", "continue"}:
         action = "none"
 
+    has_chat_decision = "chat_should_reply" in parsed or "chat_reason" in parsed
+    chat_should_reply = None
+    chat_reason = ""
+    if has_chat_decision:
+        chat_should_reply = bool(parsed.get("chat_should_reply", False))
+        parsed_reason = str(parsed.get("chat_reason") or "").strip()
+        if parsed_reason in ALLOWED_REASONS:
+            chat_reason = parsed_reason
+        else:
+            chat_reason = "not_addressed_to_bot" if not chat_should_reply else "direct_address_to_bot"
+
     return {
         "mode": allowed_mode,
         "requested_mode": requested_mode,
@@ -313,6 +329,8 @@ def parse_router_response(raw_text: str, *, player_auth: dict, active_session: d
         "confidence": confidence,
         "enter_or_continue": action,
         "private_requested": bool(parsed.get("private_requested", False)),
+        "chat_should_reply": chat_should_reply,
+        "chat_reason": chat_reason,
         "topic": str(parsed.get("topic") or "").strip(),
         "reason": str(parsed.get("reason") or "").strip(),
     }
@@ -416,6 +434,7 @@ def local_router_fallback(context: dict, player_auth: dict, active_session: dict
     named = message_mentions_bot_name(message, bot_profile)
     followup = looks_like_followup(context)
     private_requested = text_contains_any(message, PRIVATE_REQUEST_HINTS_EN, zh_markers=PRIVATE_REQUEST_HINTS_ZH)
+    raw_command_match = RAW_COMMAND_RE.match(message)
 
     if text_contains_any(message, EXIT_HINTS_EN, zh_markers=EXIT_HINTS_ZH):
         requested_mode = normalize_mode((active_session or {}).get("mode") or player_max_mode)
@@ -444,8 +463,20 @@ def local_router_fallback(context: dict, player_auth: dict, active_session: dict
                 "reason": "local router continued active session",
             }
 
-    addressed = named or followup
-    if not addressed and not str(message or "").strip().startswith("/"):
+    if raw_command_match and player_max_mode in PRIVILEGED_MODES:
+        requested_mode = MODE_COMMAND if mode_rank(player_max_mode) >= mode_rank(MODE_COMMAND) else MODE_ASSIST
+        return {
+            "mode": requested_mode,
+            "requested_mode": requested_mode,
+            "denied_by_permission": False,
+            "confidence": 0.9,
+            "enter_or_continue": "enter",
+            "private_requested": private_requested,
+            "topic": "raw minecraft command",
+            "reason": "local router raw command fallback",
+        }
+
+    if not named and not followup:
         return {
             "mode": MODE_CHAT,
             "requested_mode": MODE_CHAT,
@@ -457,69 +488,15 @@ def local_router_fallback(context: dict, player_auth: dict, active_session: dict
             "reason": "local router no clear bot signal",
         }
 
-    if text_contains_any(message, FULL_AGENT_HINTS_EN, zh_markers=FULL_AGENT_HINTS_ZH):
-        requested_mode = MODE_FULL_AGENT
-        allowed_mode = clamp_mode(requested_mode, player_max_mode)
-        return {
-            "mode": MODE_CHAT if allowed_mode != requested_mode else allowed_mode,
-            "requested_mode": requested_mode,
-            "denied_by_permission": allowed_mode != requested_mode,
-            "confidence": 0.88,
-            "enter_or_continue": "enter" if allowed_mode != MODE_CHAT else "none",
-            "private_requested": private_requested,
-            "topic": "external or computer-side task",
-            "reason": "local router full-agent keywords",
-        }
-
-    if text_contains_any(message, COMMAND_HINTS_EN, zh_markers=COMMAND_HINTS_ZH):
-        requested_mode = MODE_COMMAND if mode_rank(player_max_mode) >= mode_rank(MODE_COMMAND) else MODE_ASSIST
-        allowed_mode = clamp_mode(requested_mode, player_max_mode)
-        return {
-            "mode": allowed_mode,
-            "requested_mode": requested_mode,
-            "denied_by_permission": False,
-            "confidence": 0.84,
-            "enter_or_continue": "enter" if allowed_mode in PRIVILEGED_MODES else "none",
-            "private_requested": private_requested,
-            "topic": "minecraft command-style request",
-            "reason": "local router command keywords",
-        }
-
-    if text_contains_any(message, ASSIST_HINTS_EN, zh_markers=ASSIST_HINTS_ZH):
-        requested_mode = MODE_ASSIST
-        allowed_mode = clamp_mode(requested_mode, player_max_mode)
-        return {
-            "mode": allowed_mode,
-            "requested_mode": requested_mode,
-            "denied_by_permission": False,
-            "confidence": 0.8,
-            "enter_or_continue": "enter" if allowed_mode in PRIVILEGED_MODES else "none",
-            "private_requested": private_requested,
-            "topic": "minecraft assist request",
-            "reason": "local router assist keywords",
-        }
-
-    if text_contains_any(message, GREETING_HINTS_EN, zh_markers=GREETING_HINTS_ZH):
-        return {
-            "mode": MODE_CHAT,
-            "requested_mode": MODE_CHAT,
-            "denied_by_permission": False,
-            "confidence": 0.86,
-            "enter_or_continue": "none",
-            "private_requested": private_requested,
-            "topic": "greeting",
-            "reason": "local router greeting",
-        }
-
     return {
         "mode": MODE_CHAT,
         "requested_mode": MODE_CHAT,
         "denied_by_permission": False,
-        "confidence": 0.7,
+        "confidence": 0.68,
         "enter_or_continue": "none",
         "private_requested": private_requested,
         "topic": "",
-        "reason": "local router default chat",
+        "reason": "local router minimal chat fallback",
     }
 
 

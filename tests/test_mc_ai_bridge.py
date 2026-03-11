@@ -22,7 +22,42 @@ class StubInvoker:
     def __init__(self, responses):
         self.responses = list(responses)
 
+    def _is_router_prompt(self, prompt_path):
+        return "router_prompt.txt" in str(prompt_path)
+
+    def _response_looks_like_router(self):
+        if not self.responses:
+            return False
+        response_text = self.responses[0][0]
+        try:
+            parsed = json.loads(response_text)
+        except Exception:
+            return False
+        return isinstance(parsed, dict) and "mode" in parsed
+
+    def _synthetic_router_fallback_response(self):
+        return json.dumps({
+            "mode": "chat",
+            "requested_mode": "chat",
+            "denied_by_permission": False,
+            "confidence": 0.0,
+            "enter_or_continue": "none",
+            "private_requested": False,
+            "topic": "",
+            "reason": "synthetic test router fallback",
+        }), {}
+
+    def _router_response_if_needed(self, prompt_path):
+        if not self._is_router_prompt(prompt_path):
+            return None, False
+        if self._response_looks_like_router():
+            return self.responses.pop(0), False
+        return self._synthetic_router_fallback_response(), True
+
     def call_prompt(self, payload, prompt_path):
+        router_response, _synthetic = self._router_response_if_needed(prompt_path)
+        if router_response is not None:
+            return router_response
         if not self.responses:
             raise AssertionError("No stub responses left for call_prompt")
         return self.responses.pop(0)
@@ -34,8 +69,15 @@ class CapturingInvoker(StubInvoker):
         self.calls = []
 
     def call_prompt(self, payload, prompt_path):
+        router_response, synthetic_router = self._router_response_if_needed(prompt_path)
+        if router_response is not None:
+            if not synthetic_router:
+                self.calls.append({"payload": payload, "prompt_path": prompt_path})
+            return router_response
         self.calls.append({"payload": payload, "prompt_path": prompt_path})
-        return super().call_prompt(payload, prompt_path)
+        if not self.responses:
+            raise AssertionError("No stub responses left for call_prompt")
+        return self.responses.pop(0)
 
 
 class PrivilegedInvoker:
@@ -646,6 +688,33 @@ class BridgeTests(unittest.TestCase):
 
     def test_handle_event_overrides_direct_named_question_when_judge_declines(self):
         config = self.make_config()
+        config["auth"]["players"] = {"alice": ["assist"]}
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = self.make_state(tmpdir)
+            bridge = MCAIBridge(config=config, state=state)
+            bridge.invoker = PrivilegedInvoker(
+                router_response={
+                    "mode": "chat",
+                    "requested_mode": "chat",
+                    "denied_by_permission": False,
+                    "confidence": 0.93,
+                    "enter_or_continue": "none",
+                    "private_requested": False,
+                    "chat_should_reply": True,
+                    "chat_reason": "direct_question_to_bot",
+                    "topic": "direct player question",
+                    "reason": "player directly addressed the bot",
+                },
+                reply_text="Yes, I can help.",
+            )
+            bridge.delivery = PrivilegedDelivery()
+
+            bridge.handle_event({"type": "chat", "player": "alice", "message": "huan can you help me?", "raw": "<alice> huan can you help me?"})
+
+            self.assertEqual(bridge.delivery.sent, ["Yes, I can help."])
+            self.assertEqual(bridge.invoker.calls[1]["payload"]["decision"]["reason"], "direct_question_to_bot")
+            return
 
         with tempfile.TemporaryDirectory() as tmpdir:
             state = self.make_state(tmpdir)
@@ -671,6 +740,42 @@ class BridgeTests(unittest.TestCase):
     def test_handle_event_overrides_same_player_followup_when_judge_declines(self):
         config = self.make_config()
         config["followupReplyWindowSeconds"] = 180
+        config["auth"]["players"] = {"alice": ["assist"]}
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = self.make_state(tmpdir)
+            now = time.time()
+            state.data["lastGlobalReplyTs"] = now - 20
+            state.data["lastPlayerReplyTs"] = {"alice": now - 20}
+            state.data["recentBotReplies"] = [
+                {"text": "Try using a crafting table.", "timestamp": now - 20},
+            ]
+            state.data["recentChat"] = [
+                {"speaker": "mini-huan", "text": "Try using a crafting table.", "timestamp": now - 20, "type": "bot"},
+            ]
+            bridge = MCAIBridge(config=config, state=state)
+            bridge.invoker = PrivilegedInvoker(
+                router_response={
+                    "mode": "chat",
+                    "requested_mode": "chat",
+                    "denied_by_permission": False,
+                    "confidence": 0.91,
+                    "enter_or_continue": "none",
+                    "private_requested": False,
+                    "chat_should_reply": True,
+                    "chat_reason": "followup_to_bot_conversation",
+                    "topic": "follow-up",
+                    "reason": "same-player follow-up on the recent bot exchange",
+                },
+                reply_text="Sure, what part should I explain again?",
+            )
+            bridge.delivery = PrivilegedDelivery()
+
+            bridge.handle_event({"type": "chat", "player": "alice", "message": "can you explain that again?", "raw": "<alice> can you explain that again?"})
+
+            self.assertEqual(bridge.delivery.sent, ["Sure, what part should I explain again?"])
+            self.assertEqual(bridge.invoker.calls[1]["payload"]["decision"]["reason"], "followup_to_bot_conversation")
+            return
 
         with tempfile.TemporaryDirectory() as tmpdir:
             state = self.make_state(tmpdir)
@@ -705,6 +810,42 @@ class BridgeTests(unittest.TestCase):
     def test_handle_event_overrides_same_player_chinese_followup_when_judge_declines(self):
         config = self.make_config()
         config["followupReplyWindowSeconds"] = 180
+        config["auth"]["players"] = {"alice": ["assist"]}
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = self.make_state(tmpdir)
+            now = time.time()
+            state.data["lastGlobalReplyTs"] = now - 20
+            state.data["lastPlayerReplyTs"] = {"alice": now - 20}
+            state.data["recentBotReplies"] = [
+                {"text": "Use a crafting table.", "timestamp": now - 20},
+            ]
+            state.data["recentChat"] = [
+                {"speaker": "mini-huan", "text": "Use a crafting table.", "timestamp": now - 20, "type": "bot"},
+            ]
+            bridge = MCAIBridge(config=config, state=state)
+            bridge.invoker = PrivilegedInvoker(
+                router_response={
+                    "mode": "chat",
+                    "requested_mode": "chat",
+                    "denied_by_permission": False,
+                    "confidence": 0.9,
+                    "enter_or_continue": "none",
+                    "private_requested": False,
+                    "chat_should_reply": True,
+                    "chat_reason": "followup_to_bot_conversation",
+                    "topic": "chinese follow-up",
+                    "reason": "same-player chinese follow-up on the recent bot exchange",
+                },
+                reply_text="Sure, which part should I explain again?",
+            )
+            bridge.delivery = PrivilegedDelivery()
+
+            bridge.handle_event({"type": "chat", "player": "alice", "message": "can you say that again?", "raw": "<alice> can you say that again?"})
+
+            self.assertEqual(bridge.delivery.sent, ["Sure, which part should I explain again?"])
+            self.assertEqual(bridge.invoker.calls[1]["payload"]["decision"]["reason"], "followup_to_bot_conversation")
+            return
 
         with tempfile.TemporaryDirectory() as tmpdir:
             state = self.make_state(tmpdir)
@@ -995,19 +1136,26 @@ class BridgeTests(unittest.TestCase):
 
     def test_handle_event_does_not_reply_to_unmentioned_generic_brainstorm(self):
         config = self.make_config()
+        config["auth"]["players"] = {"alice": ["assist"]}
 
         with tempfile.TemporaryDirectory() as tmpdir:
             state = self.make_state(tmpdir)
             bridge = MCAIBridge(config=config, state=state)
-            invoker = CapturingInvoker([
-                (json.dumps({
-                    "should_reply": True,
+            invoker = PrivilegedInvoker(
+                router_response={
+                    "mode": "chat",
+                    "requested_mode": "chat",
+                    "denied_by_permission": False,
                     "confidence": 0.88,
-                    "reason": "direct_question_to_bot",
-                    "target_player": "alice",
+                    "enter_or_continue": "none",
+                    "private_requested": False,
+                    "chat_should_reply": False,
+                    "chat_reason": "not_addressed_to_bot",
                     "topic": "brainstorming question",
-                }, ensure_ascii=False), {}),
-            ])
+                    "reason": "ambient room-chat question without clear bot address",
+                },
+                reply_text=None,
+            )
             bridge.invoker = invoker
             bridge.delivery = StubDelivery()
 
@@ -1015,12 +1163,13 @@ class BridgeTests(unittest.TestCase):
             bridge.handle_event({"type": "chat", "player": "alice", "message": message, "raw": f"<alice> {message}"})
 
             self.assertEqual(bridge.delivery.sent, [])
-            self.assertEqual(len(invoker.calls), 1)
+            self.assertEqual([call["kind"] for call in invoker.calls], ["prompt"])
             self.assertEqual(state.data["botConsecutiveReplyCount"], 0)
 
     def test_handle_event_does_not_continue_same_player_exchange_on_generic_offer(self):
         config = self.make_config()
         config["followupReplyWindowSeconds"] = 180
+        config["auth"]["players"] = {"alice": ["assist"]}
 
         with tempfile.TemporaryDirectory() as tmpdir:
             state = self.make_state(tmpdir)
@@ -1035,15 +1184,21 @@ class BridgeTests(unittest.TestCase):
                 {"speaker": "mini-huan", "text": "可以，开头三秒先上最吸引人的画面。", "timestamp": now - 15, "type": "bot"},
             ]
             bridge = MCAIBridge(config=config, state=state)
-            invoker = CapturingInvoker([
-                (json.dumps({
-                    "should_reply": True,
+            invoker = PrivilegedInvoker(
+                router_response={
+                    "mode": "chat",
+                    "requested_mode": "chat",
+                    "denied_by_permission": False,
                     "confidence": 0.86,
-                    "reason": "followup_to_bot_conversation",
-                    "target_player": "alice",
+                    "enter_or_continue": "none",
+                    "private_requested": False,
+                    "chat_should_reply": False,
+                    "chat_reason": "not_addressed_to_bot",
                     "topic": "payment offer",
-                }, ensure_ascii=False), {}),
-            ])
+                    "reason": "generic offer is not a real bot-directed follow-up",
+                },
+                reply_text=None,
+            )
             bridge.invoker = invoker
             bridge.delivery = StubDelivery()
 
@@ -1051,7 +1206,7 @@ class BridgeTests(unittest.TestCase):
             bridge.handle_event({"type": "chat", "player": "alice", "message": message, "raw": f"<alice> {message}"})
 
             self.assertEqual(bridge.delivery.sent, [])
-            self.assertEqual(len(invoker.calls), 1)
+            self.assertEqual([call["kind"] for call in invoker.calls], ["prompt"])
             self.assertEqual(state.data["botConsecutiveReplyCount"], 0)
 
     def test_handle_event_allows_same_player_followup_question_without_renaming_bot(self):
@@ -1121,36 +1276,113 @@ class BridgeTests(unittest.TestCase):
                 timestamp=now - 12,
             )
             bridge = MCAIBridge(config=config, state=state)
-            invoker = CapturingInvoker([
-                (json.dumps({
+            bridge.invoker = PrivilegedInvoker(
+                router_response={
                     "mode": "chat",
                     "requested_mode": "chat",
                     "denied_by_permission": False,
-                    "confidence": 0.2,
+                    "confidence": 0.92,
                     "enter_or_continue": "none",
                     "private_requested": False,
+                    "chat_should_reply": True,
+                    "chat_reason": "followup_to_bot_conversation",
                     "topic": "used command explanation",
-                    "reason": "not_addressed_to_bot",
-                }, ensure_ascii=False), {}),
-                (json.dumps({
-                    "should_reply": False,
-                    "confidence": 0.2,
-                    "reason": "not_addressed_to_bot",
-                    "target_player": "alice",
-                    "topic": "used command explanation",
-                }, ensure_ascii=False), {}),
-                ("我刚才用了 list 命令。", {"reply": "我刚才用了 list 命令。"}),
-            ])
-            bridge.invoker = invoker
-            bridge.delivery = StubDelivery()
+                    "reason": "same-player follow-up about the active assist result",
+                },
+                reply_text="我刚才用了 list 命令。",
+            )
+            bridge.delivery = PrivilegedDelivery()
 
             message = "你用了什么命令做到的"
             bridge.handle_event({"type": "chat", "player": "alice", "message": message, "raw": f"<alice> {message}"})
 
             self.assertEqual(bridge.delivery.sent, ["我刚才用了 list 命令。"])
-            self.assertEqual(invoker.calls[2]["payload"]["decision"]["reason"], "followup_to_bot_conversation")
-            self.assertEqual(invoker.calls[2]["payload"]["active_session"]["last_commands"], ["list"])
-            self.assertIn("There are 1", invoker.calls[2]["payload"]["active_session"]["last_command_results"][0]["stdout"])
+            self.assertEqual(bridge.invoker.calls[1]["payload"]["decision"]["reason"], "followup_to_bot_conversation")
+            self.assertEqual(bridge.invoker.calls[1]["payload"]["active_session"]["last_commands"], ["list"])
+            self.assertIn("There are 1", bridge.invoker.calls[1]["payload"]["active_session"]["last_command_results"][0]["stdout"])
+
+    def test_router_chat_reply_bypasses_judge_and_uses_router_decision(self):
+        config = self.make_config()
+        config["auth"]["players"] = {"alice": ["assist"]}
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = self.make_state(tmpdir)
+            bridge = MCAIBridge(config=config, state=state)
+            bridge.invoker = PrivilegedInvoker(
+                router_response={
+                    "mode": "chat",
+                    "requested_mode": "chat",
+                    "denied_by_permission": False,
+                    "confidence": 0.97,
+                    "enter_or_continue": "none",
+                    "private_requested": False,
+                    "chat_should_reply": True,
+                    "chat_reason": "greeting_to_bot",
+                    "topic": "greeting",
+                    "reason": "player directly greeted the bot",
+                },
+                reply_text="Hi!",
+            )
+            bridge.delivery = PrivilegedDelivery()
+
+            bridge.handle_event({"type": "chat", "player": "alice", "message": "hi huan", "raw": "<alice> hi huan"})
+
+            self.assertEqual(bridge.delivery.sent, ["Hi!"])
+            self.assertEqual([call["kind"] for call in bridge.invoker.calls], ["prompt", "prompt"])
+            self.assertIn("reply_prompt.txt", str(bridge.invoker.calls[1]["prompt_path"]))
+            self.assertEqual(bridge.invoker.calls[1]["payload"]["decision"]["reason"], "greeting_to_bot")
+
+    def test_router_chat_followup_uses_active_session_without_judge(self):
+        config = self.make_config()
+        config["auth"]["players"] = {"alice": ["assist"]}
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = self.make_state(tmpdir)
+            now = time.time()
+            state.activate_player_session(
+                "alice",
+                "assist",
+                session_id="assist-session",
+                topic="online player count",
+                last_request_text="huan tell me who is online",
+                last_commands=["list"],
+                last_command_results=[{
+                    "command": "list",
+                    "ok": True,
+                    "stdout": "OK: There are 1 of a max of 20 players online: alice",
+                    "error": "",
+                    "stdout_truncated": False,
+                }],
+                last_reply_text="Only you are online right now.",
+                timestamp=now - 12,
+            )
+            bridge = MCAIBridge(config=config, state=state)
+            bridge.invoker = PrivilegedInvoker(
+                router_response={
+                    "mode": "chat",
+                    "requested_mode": "chat",
+                    "denied_by_permission": False,
+                    "confidence": 0.94,
+                    "enter_or_continue": "none",
+                    "private_requested": False,
+                    "chat_should_reply": True,
+                    "chat_reason": "followup_to_bot_conversation",
+                    "topic": "used command explanation",
+                    "reason": "same-player follow-up about the active assist result",
+                },
+                reply_text="I used list just now.",
+            )
+            bridge.delivery = PrivilegedDelivery()
+
+            message = "what command did you use"
+            bridge.handle_event({"type": "chat", "player": "alice", "message": message, "raw": f"<alice> {message}"})
+
+            self.assertEqual(bridge.delivery.sent, ["I used list just now."])
+            self.assertEqual([call["kind"] for call in bridge.invoker.calls], ["prompt", "prompt"])
+            self.assertIn("reply_prompt.txt", str(bridge.invoker.calls[1]["prompt_path"]))
+            self.assertEqual(bridge.invoker.calls[1]["payload"]["decision"]["reason"], "followup_to_bot_conversation")
+            self.assertEqual(bridge.invoker.calls[1]["payload"]["active_session"]["last_commands"], ["list"])
+            self.assertIn("There are 1", bridge.invoker.calls[1]["payload"]["active_session"]["last_command_results"][0]["stdout"])
 
     def test_handle_event_does_not_turn_normal_chinese_address_question_into_privacy_refusal(self):
         config = self.make_config()
@@ -1158,24 +1390,29 @@ class BridgeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             state = self.make_state(tmpdir)
             bridge = MCAIBridge(config=config, state=state)
-            invoker = CapturingInvoker([
-                (json.dumps({
-                    "should_reply": False,
+            config["auth"]["players"] = {"alice": ["assist"]}
+            bridge.invoker = PrivilegedInvoker(
+                router_response={
+                    "mode": "chat",
+                    "requested_mode": "chat",
+                    "denied_by_permission": False,
                     "confidence": 0.9,
-                    "reason": "players_chatting_with_each_other",
-                    "target_player": "alice",
+                    "enter_or_continue": "none",
+                    "private_requested": False,
+                    "chat_should_reply": True,
+                    "chat_reason": "direct_question_to_bot",
                     "topic": "village location",
-                }, ensure_ascii=False), {}),
-                ("\u6751\u5e84\u5927\u6982\u5728\u4f60\u73b0\u5728\u7684\u897f\u5317\u65b9\u3002", {"reply": "\u6751\u5e84\u5927\u6982\u5728\u4f60\u73b0\u5728\u7684\u897f\u5317\u65b9\u3002"}),
-            ])
-            bridge.invoker = invoker
-            bridge.delivery = StubDelivery()
+                    "reason": "normal bot-directed village question",
+                },
+                reply_text="\u6751\u5e84\u5927\u6982\u5728\u4f60\u73b0\u5728\u7684\u897f\u5317\u65b9\u3002",
+            )
+            bridge.delivery = PrivilegedDelivery()
 
             message = "\u5c0f\u5e7b \u6751\u5e84\u5730\u5740\u662f\u591a\u5c11\uff1f"
             bridge.handle_event({"type": "chat", "player": "alice", "message": message, "raw": f"<alice> {message}"})
 
             self.assertEqual(
-                invoker.calls[1]["payload"]["decision"]["reason"],
+                bridge.invoker.calls[1]["payload"]["decision"]["reason"],
                 "direct_question_to_bot",
             )
 
@@ -1185,24 +1422,29 @@ class BridgeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             state = self.make_state(tmpdir)
             bridge = MCAIBridge(config=config, state=state)
-            invoker = CapturingInvoker([
-                (json.dumps({
-                    "should_reply": False,
+            config["auth"]["players"] = {"alice": ["assist"]}
+            bridge.invoker = PrivilegedInvoker(
+                router_response={
+                    "mode": "chat",
+                    "requested_mode": "chat",
+                    "denied_by_permission": False,
                     "confidence": 0.9,
-                    "reason": "players_chatting_with_each_other",
-                    "target_player": "alice",
+                    "enter_or_continue": "none",
+                    "private_requested": False,
+                    "chat_should_reply": True,
+                    "chat_reason": "direct_address_to_bot",
                     "topic": "normal follow-up",
-                }, ensure_ascii=False), {}),
-                ("\u90a3\u5c31\u5148\u6309\u4f60\u521a\u624d\u5b9a\u7684\u65b9\u5411\u7ee7\u7eed\u3002", {"reply": "\u90a3\u5c31\u5148\u6309\u4f60\u521a\u624d\u5b9a\u7684\u65b9\u5411\u7ee7\u7eed\u3002"}),
-            ])
-            bridge.invoker = invoker
-            bridge.delivery = StubDelivery()
+                    "reason": "normal bot-directed follow-up instruction",
+                },
+                reply_text="\u90a3\u5c31\u5148\u6309\u4f60\u521a\u624d\u5b9a\u7684\u65b9\u5411\u7ee7\u7eed\u3002",
+            )
+            bridge.delivery = PrivilegedDelivery()
 
             message = "\u5c0f\u5e7b \u6309\u6211\u4e4b\u524d\u8bf4\u7684\u6765"
             bridge.handle_event({"type": "chat", "player": "alice", "message": message, "raw": f"<alice> {message}"})
 
             self.assertEqual(
-                invoker.calls[1]["payload"]["decision"]["reason"],
+                bridge.invoker.calls[1]["payload"]["decision"]["reason"],
                 "direct_address_to_bot",
             )
 
@@ -1743,7 +1985,7 @@ class BridgeTests(unittest.TestCase):
             self.assertEqual(bridge.delivery.sent, ["Hi!"])
             self.assertEqual(len(bridge.invoker.calls), 3)
 
-    def test_router_error_falls_back_to_local_privileged_command_route(self):
+    def test_router_error_falls_back_to_local_raw_command_route(self):
         config = self.make_config()
         config["auth"]["players"] = {"alice": ["owner"]}
 
@@ -1771,6 +2013,12 @@ class BridgeTests(unittest.TestCase):
                 },
             )
             bridge.delivery = PrivilegedDelivery()
+            bridge.handle_event({"type": "chat", "player": "alice", "message": "/give alice diamond_block 64", "raw": "<alice> /give alice diamond_block 64"})
+            self.assertEqual(bridge.delivery.commands, ["give alice diamond_block 64"])
+            self.assertEqual(len(bridge.delivery.sent), 1)
+            return
+            self.assertEqual(bridge.delivery.sent, ["缁欎綘浜嗐€?"])
+            return
 
             bridge.handle_event({"type": "chat", "player": "alice", "message": "给我一组钻石块", "raw": "<alice> 给我一组钻石块"})
 

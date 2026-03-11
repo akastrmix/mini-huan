@@ -19,7 +19,7 @@ This repo is the bridge, not the helper workspace.
 Bridge owns:
 - Minecraft log parsing
 - Short-term runtime state and context selection
-- Judge/reply orchestration
+- Turn orchestration, short-term session continuity, and reply delivery
 - Anti-spam and follow-up gating
 - RCON delivery
 
@@ -96,9 +96,13 @@ If you just opened this project and want the fastest path to understanding it, r
 Mental model:
 - A Minecraft chat line comes in from `latest.log`
 - The bridge stores short-term context in runtime state
-- If the player is configured for privileged modes, the bridge can first route the turn into `assist`, `command`, or `full_agent`
-- The judge step decides whether the bot should speak
-- The reply step generates the final message only if judge passes
+- The router is the primary turn entrypoint for every chat turn
+- The router decides whether the turn stays in `chat` or enters/continues `assist`, `command`, or `full_agent`
+- On `chat` routes, the router can now also decide whether the bot should reply at all, so the bridge does not immediately re-judge the same turn
+- The judge step remains as a lighter fallback path when routing is unavailable, skipped, or returns no explicit chat decision
+- In that fallback path, the bridge no longer adds a second public-chat signal guard on top of the helper's judge output
+- That fallback judge path now mainly preserves refusal/boundary continuity instead of proactively rescuing ordinary bot-directed chat
+- The reply step generates the final message only after a routed chat decision or fallback judge pass
 - The bridge sends the message back to Minecraft via RCON
 
 Fresh-session defaults:
@@ -113,9 +117,10 @@ Fresh-session defaults:
 Minecraft latest.log
   -> app/mc_log_listener.py parses log lines
   -> app/mc_ai_bridge.py records short-term context
-  -> app/mc_ai_bridge.py optionally routes privileged players into assist/command/full_agent
+  -> app/mc_ai_bridge.py routes every chat turn through the router first
+  -> the router chooses chat/assist/command/full_agent and can also decide whether a chat turn should speak
   -> assist/command can now loop: helper plans commands -> bridge executes -> helper reads command results -> helper decides next step
-  -> normal chat still uses judge via mc-helper
+  -> if the router does not supply a chat decision, the bridge can still fall back to judge via mc-helper
   -> if approved, app/mc_ai_bridge.py calls reply via mc-helper
   -> privileged modes can execute RCON commands and/or send a reply
   -> Minecraft tellraw @a
@@ -128,11 +133,11 @@ Minecraft latest.log
 - [CONFIG_FIELDS.md](/C:/Users/Administrator/.openclaw/workspace-mc-bridge/docs/CONFIG_FIELDS.md)
   - field-by-field guide to `bridge_config.json`
 - [judge_prompt.txt](/C:/Users/Administrator/.openclaw/workspace-mc-bridge/config/judge_prompt.txt)
-  - bridge-owned should-reply policy
+  - fallback public-chat gate when the primary router path is unavailable or skipped
 - [reply_prompt.txt](/C:/Users/Administrator/.openclaw/workspace-mc-bridge/config/reply_prompt.txt)
   - bridge-owned reply constraints layered on top of helper persona
 - [router_prompt.txt](/C:/Users/Administrator/.openclaw/workspace-mc-bridge/config/router_prompt.txt)
-  - natural-language routing into `chat`, `assist`, `command`, or `full_agent`
+  - primary turn orchestrator for routing plus chat/no-chat decisions on the main path
 - [assist_prompt.txt](/C:/Users/Administrator/.openclaw/workspace-mc-bridge/config/assist_prompt.txt)
   - permissive light-to-medium in-game assistance with model judgment
 - [command_prompt.txt](/C:/Users/Administrator/.openclaw/workspace-mc-bridge/config/command_prompt.txt)
@@ -142,7 +147,7 @@ Minecraft latest.log
 - [bridge_context.py](/C:/Users/Administrator/.openclaw/workspace-mc-bridge/app/bridge_context.py)
   - context scoring, player/bot history selection, and human-answer detection
 - [bridge_judge.py](/C:/Users/Administrator/.openclaw/workspace-mc-bridge/app/bridge_judge.py)
-  - judge parsing, refusal/direct overrides, and gating
+  - fallback judge parsing, refusal/boundary continuity, and gating
 - [bridge_privileged.py](/C:/Users/Administrator/.openclaw/workspace-mc-bridge/app/bridge_privileged.py)
   - permission resolution, routing parse, and privileged result parsing
 - [bridge_delivery.py](/C:/Users/Administrator/.openclaw/workspace-mc-bridge/app/bridge_delivery.py)
@@ -215,13 +220,14 @@ Available modes:
   - full OpenClaw-style agent turns, including tools/computer control and optional Minecraft commands
 
 Notes:
-- Privileged routing is only attempted for players whose configured max mode is above `chat`, or who already have an active privileged session
+- Every chat turn now enters the router first; permission and active-session state only affect how far above `chat` the router may go
 - Sessions are tracked per player, not globally
 - The bridge launches helper calls from `helperWorkspacePath`, but OpenClaw can still resume a previously stored session; if the resolved workspace or injected skills look wrong, inspect `runtime/last_invoke_debug.txt`
 - Public reply remains the default; private reply only happens when the player explicitly asks for it
-- The router prompt is now responsible for detecting live Minecraft state queries that require command output; those should prefer `assist` or `command` instead of `chat`
+- The router prompt is now the primary decider for both capability routing and whether a `chat` turn should get a public reply at all
+- The router prompt is responsible for detecting live Minecraft state queries that require command output; those should prefer `assist` or `command` instead of `chat`
 - `assist` and `command` now support a bridge-managed multi-step command loop, so the helper can probe live state, inspect real stdout, and then continue or summarize
-- Same-player follow-up questions right after a privileged result can now reuse the stored privileged session context even when the player does not repeat the bot's name
+- Same-player follow-up questions right after a privileged result now stay on the router/helper path first, so they can reuse the stored privileged session context even when the player does not repeat the bot's name
 
 ## Helper-local Planner
 
@@ -248,7 +254,8 @@ Current generic execution skill kept separate:
 Behavior notes:
 - The helper-local planner is planner-first; the bridge still owns actual RCON delivery
 - `commandPlannerScriptPath` currently powers the local privileged execution fallback path; the main privileged path now prefers helper-driven routing plus the multi-step command protocol
-- The bridge-local router fallback still contains keyword-based heuristics for `assist`, `command`, and `full_agent`, so command/query intent is not fully delegated to the helper side yet
+- The bridge-local router fallback is now intentionally minimal: it mainly preserves active-session continuation, exit, and explicit raw command fallback when the helper-side router fails
+- On the main path, routed `chat` turns no longer immediately go through a second should-reply pass in judge; the router owns that decision unless it omits the chat decision fields or routing falls back
 - Follow-up shorthand like `again`, `one more`, or `再来一组` is resolved using per-player last successful privileged execution context
 - If the privileged helper route errors, the bridge can still fall back to the helper-local planner script
 - In the main helper path, the bridge now returns actual command stdout/error results back to the helper between `assist`/`command` steps

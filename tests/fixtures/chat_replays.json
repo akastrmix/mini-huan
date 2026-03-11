@@ -5,6 +5,18 @@
       "player": "RTX3060Ti1604",
       "message": "你觉得我该怎么整"
     },
+    "router_response": {
+      "mode": "chat",
+      "requested_mode": "chat",
+      "denied_by_permission": false,
+      "confidence": 0.88,
+      "enter_or_continue": "none",
+      "private_requested": false,
+      "chat_should_reply": false,
+      "chat_reason": "not_addressed_to_bot",
+      "topic": "brainstorming question",
+      "reason": "ambient room-chat question without clear bot address"
+    },
     "judge_response": {
       "should_reply": true,
       "confidence": 0.88,
@@ -53,6 +65,18 @@
     "event": {
       "player": "RTX3060Ti1604",
       "message": "我可以pay你20"
+    },
+    "router_response": {
+      "mode": "chat",
+      "requested_mode": "chat",
+      "denied_by_permission": false,
+      "confidence": 0.86,
+      "enter_or_continue": "none",
+      "private_requested": false,
+      "chat_should_reply": false,
+      "chat_reason": "not_addressed_to_bot",
+      "topic": "payment offer",
+      "reason": "generic offer is not a real bot-directed follow-up"
     },
     "judge_response": {
       "should_reply": true,
