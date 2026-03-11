@@ -15,9 +15,9 @@ This file explains the fields in `bridge_config.json` as the bridge works today.
 - `promptPath`
   - Reply-stage prompt file
 - `judgePromptPath`
-  - Fallback judge-stage prompt file used when the primary router path is unavailable, skipped, or does not return an explicit chat decision
+  - Fallback judge-stage prompt file used when the primary router path is unavailable, skipped, or does not return a usable chat decision
 - `routerPromptPath`
-  - Primary turn-orchestration prompt file for capability routing plus main-path `chat` reply/no-reply decisions
+  - Primary turn-orchestration prompt file for capability routing plus main-path `chat` reply/no-reply, refusal, and permission-denied decisions
 - `assistPromptPath`
   - Privileged in-game assist prompt file
 - `commandPromptPath`
@@ -90,10 +90,11 @@ Behavior notes:
 - Every chat turn now enters the router first; player auth and active-session state only decide whether the router can stay in `chat` or escalate above it
 - Public reply is still the default; private reply only happens when the player explicitly asks for it
 - Privileged sessions are tracked per player, not globally
-- The router is now the main decider for both privileged mode selection and whether a routed `chat` turn should speak at all
+- The router is now the main decider for both privileged mode selection and whether a routed `chat` turn should speak at all, including most refusal/limitation and permission-denied chat replies
 - Live Minecraft state questions that require real command output should route through the prompt into `assist` or `command`, not stay in `chat`
 - `assist` and `command` now support a bridge-managed multi-step loop: helper returns commands, bridge executes them, helper receives actual results, then helper decides the next step or final reply
 - Same-player follow-up questions can reuse the stored active privileged session context even when the player does not rename the bot, and those follow-ups now stay on the router/helper path before judge fallback is considered
+- Same-player natural boundary continuations right after a recent refusal should also prefer the router-owned `chat` path before judge fallback is considered
 - The bridge-local router fallback is now intentionally minimal: it mainly preserves active-session continuation, exit, and explicit raw command fallback after router failure
 - Continuation phrases such as `again`, `one more`, or `再来一组` can reuse the player's last successful privileged command context
 
@@ -173,8 +174,12 @@ Behavior note:
 - Direct asks that the bot cannot fulfill because of privacy, permissions/capabilities, or short-memory limits should usually still receive a short refusal/limitation reply; only clearly unsafe or non-directed content should stay silent
 - If a player clearly addresses the bot by `mini-huan`, `huan`, or the configured `displayNameZh`, or clearly continues a recent same-player bot exchange, the bridge should usually prefer replying over silently treating it as background chatter
 - On the main routed path, those public-chat reply/no-reply calls now come from the router first; the judge prompt mainly serves as a fallback gate instead of a second opinion on every privileged-capable turn
+- On that main routed path, refusal/limitation calls and permission-denied chat refusals should also normally come from the router rather than from bridge-local override logic
 - In that fallback judge path, the bridge no longer adds an extra public-chat signal suppression pass after the helper's judge response
-- That fallback judge path now mainly keeps refusal/boundary continuity, rather than rescuing ordinary bot-directed chat that the router should have handled
+- That fallback judge path now mainly keeps minimal refusal/boundary continuity, rather than rescuing ordinary bot-directed chat that the router should have handled
+- If a helper-router `chat` route omits or invalidates the chat decision, the bridge now logs a router contract miss and falls back to judge instead of silently repairing it
+- The bridge itself no longer rewrites declined judge outputs into refusal/boundary replies
+- If the router omits or invalidates a permission-denied chat decision, the bridge now logs a router contract miss and falls back to judge instead of synthesizing its own `capability_refusal`
 
 ## Runtime state sizing
 

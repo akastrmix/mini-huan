@@ -311,16 +311,17 @@ def parse_router_response(raw_text: str, *, player_auth: dict, active_session: d
     if allowed_mode not in PRIVILEGED_MODES and action in {"enter", "continue"}:
         action = "none"
 
-    has_chat_decision = "chat_should_reply" in parsed or "chat_reason" in parsed
+    has_chat_should_reply = "chat_should_reply" in parsed
+    has_chat_reason = "chat_reason" in parsed
     chat_should_reply = None
     chat_reason = ""
-    if has_chat_decision:
+    if has_chat_should_reply and has_chat_reason:
         chat_should_reply = bool(parsed.get("chat_should_reply", False))
         parsed_reason = str(parsed.get("chat_reason") or "").strip()
         if parsed_reason in ALLOWED_REASONS:
             chat_reason = parsed_reason
         else:
-            chat_reason = "not_addressed_to_bot" if not chat_should_reply else "direct_address_to_bot"
+            chat_should_reply = None
 
     return {
         "mode": allowed_mode,
@@ -397,42 +398,9 @@ def text_contains_any(message: str, english_markers=(), *, zh_markers=()):
     return any(marker in lower_text for marker in english_markers) or any(marker in raw_text for marker in zh_markers)
 
 
-def message_mentions_bot_name(message: str, bot_profile: dict):
-    lower_text = str(message or "").lower()
-    names = [
-        str(bot_profile.get("name") or "").strip().lower(),
-        str(bot_profile.get("name_zh") or "").strip().lower(),
-        *[str(item or "").strip().lower() for item in list(bot_profile.get("name_aliases") or [])],
-    ]
-    return any(name and name in lower_text for name in names)
-
-
-def looks_like_followup(context: dict):
-    current_player = str(((context or {}).get("current_message") or {}).get("player") or "")
-    if not current_player:
-        return False
-    recent_chat = list((context or {}).get("recent_chat") or [])
-    seen_current = False
-    for entry in reversed(recent_chat):
-        speaker = str(entry.get("speaker") or "")
-        entry_type = str(entry.get("type") or "player")
-        if not seen_current:
-            if entry_type == "player" and speaker == current_player:
-                seen_current = True
-            continue
-        if entry_type == "bot":
-            return True
-        if entry_type == "player" and speaker and speaker != current_player:
-            return False
-    return False
-
-
 def local_router_fallback(context: dict, player_auth: dict, active_session: dict | None):
     message = str(((context or {}).get("current_message") or {}).get("text") or "")
     player_max_mode = normalize_mode((player_auth or {}).get("max_mode"))
-    bot_profile = dict((context or {}).get("bot_profile") or {})
-    named = message_mentions_bot_name(message, bot_profile)
-    followup = looks_like_followup(context)
     private_requested = text_contains_any(message, PRIVATE_REQUEST_HINTS_EN, zh_markers=PRIVATE_REQUEST_HINTS_ZH)
     raw_command_match = RAW_COMMAND_RE.match(message)
 
@@ -476,27 +444,15 @@ def local_router_fallback(context: dict, player_auth: dict, active_session: dict
             "reason": "local router raw command fallback",
         }
 
-    if not named and not followup:
-        return {
-            "mode": MODE_CHAT,
-            "requested_mode": MODE_CHAT,
-            "denied_by_permission": False,
-            "confidence": 0.72,
-            "enter_or_continue": "none",
-            "private_requested": private_requested,
-            "topic": "",
-            "reason": "local router no clear bot signal",
-        }
-
     return {
         "mode": MODE_CHAT,
         "requested_mode": MODE_CHAT,
         "denied_by_permission": False,
-        "confidence": 0.68,
+        "confidence": 0.0,
         "enter_or_continue": "none",
         "private_requested": private_requested,
         "topic": "",
-        "reason": "local router minimal chat fallback",
+        "reason": "local router generic chat fallback",
     }
 
 

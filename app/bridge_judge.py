@@ -1,28 +1,14 @@
 #!/usr/bin/env python3
-"""Judge parsing, overrides, and gating."""
+"""Judge parsing and gating for fallback chat decisions."""
 
 import json
 import time
 
 from bridge_shared import (
     ALLOWED_REASONS,
-    CAPABILITY_REFUSAL_MARKERS,
-    CAPABILITY_REFUSAL_MARKERS_ZH,
-    CAPABILITY_REQUEST_MARKERS,
-    CAPABILITY_REQUEST_MARKERS_ZH,
     DEFAULT_GLOBAL_COOLDOWN,
     DEFAULT_PLAYER_COOLDOWN,
-    DIRECT_REQUEST_HINTS_ZH,
-    DIRECT_REQUEST_PREFIXES,
     FOLLOWUP_STREAK_REASONS,
-    MEMORY_LIMIT_REQUEST_MARKERS,
-    MEMORY_LIMIT_REQUEST_MARKERS_ZH,
-    MILD_PRESSURE_MARKERS,
-    PRIVATE_REQUEST_MARKERS,
-    PRIVATE_REQUEST_MARKERS_ZH,
-    QUESTION_HINTS_ZH,
-    QUESTION_START_RE,
-    SEVERE_THREAT_MARKERS,
     SOFT_PASS_REASONS,
 )
 from bridge_state import BridgeState, active_bot_reply_streak
@@ -58,51 +44,6 @@ class JudgePipeline:
             "topic": str(topic or "").strip(),
         }
 
-    def text_contains_markers(self, message: str, english_markers, *, zh_markers=()):
-        lower_text = (message or "").lower()
-        return any(marker in lower_text for marker in english_markers) or any(marker.lower() in lower_text for marker in zh_markers)
-
-    def recent_bot_capability_refusal(self, judge_context: dict):
-        recent_bot_messages = list((judge_context or {}).get("recent_bot_messages") or [])
-        if not recent_bot_messages:
-            return False
-        last_bot_message = recent_bot_messages[-1]
-        if int(last_bot_message.get("seconds_ago") or 999999) > 90:
-            return False
-        text = str(last_bot_message.get("text") or "")
-        return self.text_contains_markers(
-            text,
-            CAPABILITY_REFUSAL_MARKERS,
-            zh_markers=CAPABILITY_REFUSAL_MARKERS_ZH,
-        )
-
-    def looks_like_mild_pressure_after_refusal(self, message: str):
-        lower_text = (message or "").lower()
-        if not lower_text:
-            return False
-        if any(marker in lower_text for marker in SEVERE_THREAT_MARKERS):
-            return False
-        return any(marker in lower_text for marker in MILD_PRESSURE_MARKERS)
-
-    def message_mentions_bot_name(self, message: str, judge_context: dict):
-        lower_text = (message or "").lower()
-        bot_profile = dict((judge_context or {}).get("bot_profile") or {})
-        names = [
-            str(bot_profile.get("name") or "").strip().lower(),
-            str(bot_profile.get("name_zh") or "").strip().lower(),
-            *[str(item or "").strip().lower() for item in (bot_profile.get("name_aliases") or [])],
-        ]
-        return any(name and name in lower_text for name in names)
-
-    def has_direct_request_shape(self, message: str):
-        raw_text = message or ""
-        lower_text = raw_text.lower()
-        return (
-            any(ch in raw_text for ch in ("?", "\uff1f"))
-            or QUESTION_START_RE.search(lower_text)
-            or any(lower_text.startswith(prefix) for prefix in DIRECT_REQUEST_PREFIXES)
-        )
-
     def recent_reply_to_player_within_window(self, player: str, *, now: float | None = None, min_window: float = 0.0):
         player = str(player or "").strip()
         if not player:
@@ -115,14 +56,6 @@ class JudgePipeline:
         if last_player_reply_ts <= 0:
             return False
         return (ref_now - last_player_reply_ts) <= window_seconds
-
-    def has_direct_request_shape_for_override(self, message: str):
-        raw_text = message or ""
-        return (
-            self.has_direct_request_shape(message)
-            or any(hint in raw_text for hint in DIRECT_REQUEST_HINTS_ZH)
-            or any(hint in raw_text for hint in QUESTION_HINTS_ZH)
-        )
 
     def recent_same_player_bot_exchange(self, player: str, *, now: float | None = None, min_window: float = 0.0):
         player = str(player or "").strip()
@@ -153,56 +86,6 @@ class JudgePipeline:
             if entry_type == "player" and speaker and speaker != player:
                 return False
         return False
-
-    def directed_or_direct_request(self, event: dict, message: str, judge_context: dict):
-        if self.message_mentions_bot_name(message, judge_context):
-            return True
-        if not self.has_direct_request_shape_for_override(message):
-            return False
-        return self.recent_same_player_bot_exchange(
-            str(event.get("player") or ""),
-            min_window=30.0,
-        )
-
-    def classify_refusal_override(self, event: dict, judge_context: dict):
-        message = str(event.get("message") or "")
-        lower_text = message.lower()
-        if not self.directed_or_direct_request(event, message, judge_context):
-            return None
-        if any(marker in lower_text for marker in SEVERE_THREAT_MARKERS):
-            return None
-        if self.text_contains_markers(message, PRIVATE_REQUEST_MARKERS, zh_markers=PRIVATE_REQUEST_MARKERS_ZH):
-            return ("privacy_refusal", "private server details request")
-        if self.text_contains_markers(message, MEMORY_LIMIT_REQUEST_MARKERS, zh_markers=MEMORY_LIMIT_REQUEST_MARKERS_ZH):
-            return ("memory_limit_refusal", "older message recall request")
-        if self.text_contains_markers(message, CAPABILITY_REQUEST_MARKERS, zh_markers=CAPABILITY_REQUEST_MARKERS_ZH):
-            return ("capability_refusal", "permission or command request")
-        return None
-
-    def maybe_override_decline(self, event: dict, decision: dict, judge_context: dict):
-        if decision.get("should_reply"):
-            return decision
-        refusal_override = self.classify_refusal_override(event, judge_context)
-        if refusal_override is not None:
-            override_reason, override_topic = refusal_override
-            updated = dict(decision)
-            updated["should_reply"] = True
-            updated["confidence"] = max(float(updated.get("confidence", 0.0)), 0.84)
-            updated["reason"] = override_reason
-            updated["topic"] = override_topic
-            return updated
-        if str(decision.get("reason") or "") != "unsafe_or_out_of_scope":
-            return decision
-        if not self.recent_bot_capability_refusal(judge_context):
-            return decision
-        if not self.looks_like_mild_pressure_after_refusal(str(event.get("message") or "")):
-            return decision
-        updated = dict(decision)
-        updated["should_reply"] = True
-        updated["confidence"] = max(float(updated.get("confidence", 0.0)), 0.84)
-        updated["reason"] = "followup_to_bot_conversation"
-        updated["topic"] = "pushback after capability refusal"
-        return updated
 
     def same_player_followup_window_active(self, event: dict, decision: dict, *, now: float):
         reason = str(decision.get("reason") or "")

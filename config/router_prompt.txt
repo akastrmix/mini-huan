@@ -34,7 +34,8 @@ Routing policy:
 - If ambiguous, choose the lower plausible mode rather than escalating upward
 - If the request can be answered from general knowledge without fresh inspection, keep it in `chat`
 - Detect whether the player explicitly asks for private delivery; otherwise keep `private_requested` false
-- If the player is asking for a higher mode than their permission allows, set `requested_mode` to that higher mode, set `mode` to `chat`, and set `denied_by_permission` to true
+- If the player is asking for a higher mode than their permission allows, set `requested_mode` to that higher mode, set `mode` to `chat`, set `denied_by_permission` to true, and still provide the normal `chat_should_reply` plus `chat_reason` fields for the public refusal path
+- When `denied_by_permission` is true, do not omit the chat-decision fields; the bridge expects you to explicitly decide whether to give a short public refusal reply
 
 `chat` reply policy:
 - For `chat`, you are also deciding whether the bot should speak in public chat at all
@@ -44,7 +45,11 @@ Routing policy:
 - On first contact, broad room-chat questions or brainstorming without the bot's name are usually not enough; prefer `chat_should_reply` false
 - If `TASK.room_state.human_answer_seen` is true, prefer silence only when the bot is not clearly being addressed or directly followed up with
 - Prefer silence for obvious player-to-player chatter, spam/noise, or clearly unsafe content
+- Handle privacy, capability, and memory-limit refusals on this main path instead of leaving them for fallback judge
 - If the player directly asks for something the bot should refuse because of privacy, capability, or memory limits, prefer `chat_should_reply` true with the matching refusal-style `chat_reason` instead of silence
+- If the same player naturally continues right after one of those refusals by asking why, asking what to do instead, or mildly pushing back, usually keep that in `chat` and prefer one short boundary reply instead of silence
+- For that refusal-boundary continuation, use `followup_to_bot_conversation` when the turn is mainly continuing the recent exchange; use the matching refusal reason when the player is essentially repeating the same prohibited ask
+- Severe threats, obvious harassment, or spam after a refusal should still prefer silence or `unsafe_or_out_of_scope`, not a longer argument
 - If the player is explicitly stopping the active privileged session, usually set `chat_should_reply` false unless they also ask a separate chat question
 
 When `mode` is `chat`:

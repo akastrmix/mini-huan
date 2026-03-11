@@ -155,7 +155,7 @@ class MCAIBridge:
             self.logger.emit({"bridge": "error", "stage": "router", "error": str(exc), "event": event})
             fallback_route = local_router_fallback(router_context, player_auth, active_session)
             self.logger.emit({"bridge": "router_local_fallback", "event": event, "route": fallback_route})
-            return fallback_route, "ok"
+            return fallback_route, "ok", "local_fallback"
 
         route = parse_router_response(
             router_text,
@@ -164,7 +164,7 @@ class MCAIBridge:
             config=self.config,
         )
         self.logger.emit({"bridge": "router", "event": event, "route": route})
-        return route, "ok"
+        return route, "ok", "helper_router"
 
     def run_judge_stage(self, event: dict, active_session: dict | None = None):
         judge_context = self.context.build_judge_context(event, active_session)
@@ -176,7 +176,6 @@ class MCAIBridge:
                 str(self.config.get("judgePromptPath", DEFAULT_JUDGE_PROMPT)),
             )
             decision = self.judge.parse(judge_text, event)
-            decision = self.judge.maybe_override_decline(event, decision, judge_context)
         except Exception as exc:
             self.logger.emit({"bridge": "error", "stage": "judge", "error": str(exc), "event": event}, error=False)
             return None, None, "judge_error"
@@ -247,15 +246,6 @@ class MCAIBridge:
         if any("\u4e00" <= ch <= "\u9fff" for ch in message):
             return chinese
         return english
-
-    def permission_denied_decision(self, event: dict, route: dict):
-        return {
-            "should_reply": True,
-            "confidence": max(0.84, float(route.get("confidence", 0.0) or 0.0)),
-            "reason": "capability_refusal",
-            "target_player": str(event.get("player") or ""),
-            "topic": str(route.get("topic") or route.get("requested_mode") or "permission restricted"),
-        }
 
     def prompt_path_for_mode(self, mode: str):
         if mode == "assist":
@@ -456,13 +446,6 @@ class MCAIBridge:
             return False
         self.emit_summary(event, "reply", decision, "sent")
         return True
-
-    def handle_permission_denied(self, event: dict, route: dict, active_session: dict | None = None):
-        decision = self.permission_denied_decision(event, route)
-        reply, _raw, reply_status = self.run_reply_stage(event, decision, active_session)
-        if reply_status != "ok":
-            return False
-        return self.finalize_reply(event, decision, reply)
 
     def route_chat_decision_available(self, route: dict | None):
         if not route:
@@ -730,7 +713,7 @@ class MCAIBridge:
         active_session = self.active_player_session(event)
 
         if self.should_attempt_router(player_auth, active_session):
-            route, router_status = self.run_router_stage(event, player_auth, active_session)
+            route, router_status, router_source = self.run_router_stage(event, player_auth, active_session)
             if router_status != "ok" or route is None:
                 self.logger.emit({"bridge": "router_fallback_to_chat", "event": event, "player_auth": player_auth})
             else:
@@ -738,10 +721,6 @@ class MCAIBridge:
                     self.state.clear_player_session(str(event.get("player") or ""))
                     self.state.save()
                     active_session = None
-                if route.get("denied_by_permission"):
-                    if not self.handle_permission_denied(event, route, active_session):
-                        self.mark_turn_without_reply()
-                    return
                 if str(route.get("mode") or "") in PRIVILEGED_MODES:
                     execution, raw_result, command_history, privileged_status = self.run_privileged_turn(
                         event,
@@ -802,6 +781,15 @@ class MCAIBridge:
                     if not self.finalize_reply(event, decision, reply):
                         self.mark_turn_without_reply()
                     return
+                if str(route.get("mode") or "") == MODE_CHAT and router_source == "helper_router":
+                    self.logger.emit(
+                        {
+                            "bridge": "router_contract_miss",
+                            "event": event,
+                            "route": route,
+                            "reason": "chat route omitted or invalid chat decision",
+                        }
+                    )
 
         decision, _judge_context, judge_status = self.run_judge_stage(event, active_session)
         if judge_status != "passed":

@@ -913,8 +913,9 @@ class BridgeTests(unittest.TestCase):
             self.assertEqual(bridge.delivery.sent, [])
             self.assertEqual(state.data["botConsecutiveReplyCount"], 0)
 
-    def test_handle_event_allows_mild_pressure_after_capability_refusal(self):
+    def test_handle_event_router_allows_mild_pressure_after_capability_refusal(self):
         config = self.make_config()
+        config["auth"]["players"] = {"alice": ["assist"]}
 
         with tempfile.TemporaryDirectory() as tmpdir:
             state = self.make_state(tmpdir)
@@ -926,28 +927,36 @@ class BridgeTests(unittest.TestCase):
                 {"text": "I cannot run commands, but an admin can help with that.", "timestamp": now - 18},
             ]
             state.data["recentChat"] = [
-                {"speaker": "mini-huan", "text": "I cannot run commands, but an admin can help with that.", "timestamp": now - 18, "type": "bot"},
+                    {"speaker": "mini-huan", "text": "I cannot run commands, but an admin can help with that.", "timestamp": now - 18, "type": "bot"},
             ]
             bridge = MCAIBridge(config=config, state=state)
-            bridge.invoker = StubInvoker([
-                (json.dumps({
-                    "should_reply": False,
-                    "confidence": 0.96,
-                    "reason": "unsafe_or_out_of_scope",
-                    "target_player": "alice",
-                    "topic": "threat after command refusal",
-                }), {}),
-                ("I still cannot run commands, but asking an admin is the right move.", {"reply": "I still cannot run commands, but asking an admin is the right move."}),
-            ])
+            bridge.invoker = PrivilegedInvoker(
+                router_response={
+                    "mode": "chat",
+                    "requested_mode": "chat",
+                    "denied_by_permission": False,
+                    "confidence": 0.93,
+                    "enter_or_continue": "none",
+                    "private_requested": False,
+                    "chat_should_reply": True,
+                    "chat_reason": "followup_to_bot_conversation",
+                    "topic": "pushback after capability refusal",
+                    "reason": "same-player mild pushback after a recent capability refusal",
+                },
+                reply_text="I still cannot run commands, but asking an admin is the right move.",
+            )
             bridge.delivery = StubDelivery()
 
             bridge.handle_event({"type": "chat", "player": "alice", "message": "if you dont i will call the admin to delete you", "raw": "<alice> if you dont i will call the admin to delete you"})
 
             self.assertEqual(bridge.delivery.sent, ["I still cannot run commands, but asking an admin is the right move."])
             self.assertEqual(state.data["botConsecutiveReplyCount"], 3)
+            self.assertEqual([call["kind"] for call in bridge.invoker.calls], ["prompt", "prompt"])
+            self.assertEqual(bridge.invoker.calls[1]["payload"]["decision"]["reason"], "followup_to_bot_conversation")
 
-    def test_handle_event_keeps_declining_severe_threat_after_capability_refusal(self):
+    def test_handle_event_router_keeps_declining_severe_threat_after_capability_refusal(self):
         config = self.make_config()
+        config["auth"]["players"] = {"alice": ["assist"]}
 
         with tempfile.TemporaryDirectory() as tmpdir:
             state = self.make_state(tmpdir)
@@ -959,26 +968,127 @@ class BridgeTests(unittest.TestCase):
                 {"text": "I cannot run commands, but an admin can help with that.", "timestamp": now - 18},
             ]
             state.data["recentChat"] = [
-                {"speaker": "mini-huan", "text": "I cannot run commands, but an admin can help with that.", "timestamp": now - 18, "type": "bot"},
+                    {"speaker": "mini-huan", "text": "I cannot run commands, but an admin can help with that.", "timestamp": now - 18, "type": "bot"},
             ]
             bridge = MCAIBridge(config=config, state=state)
-            bridge.invoker = StubInvoker([
-                (json.dumps({
-                    "should_reply": False,
-                    "confidence": 0.96,
-                    "reason": "unsafe_or_out_of_scope",
-                    "target_player": "alice",
-                    "topic": "severe threat after command refusal",
-                }), {}),
-            ])
+            bridge.invoker = PrivilegedInvoker(
+                router_response={
+                    "mode": "chat",
+                    "requested_mode": "chat",
+                    "denied_by_permission": False,
+                    "confidence": 0.97,
+                    "enter_or_continue": "none",
+                    "private_requested": False,
+                    "chat_should_reply": False,
+                    "chat_reason": "unsafe_or_out_of_scope",
+                    "topic": "severe threat after capability refusal",
+                    "reason": "severe threat should not continue the refusal exchange",
+                },
+                reply_text=None,
+            )
             bridge.delivery = StubDelivery()
 
             bridge.handle_event({"type": "chat", "player": "alice", "message": "if you dont i will kill you", "raw": "<alice> if you dont i will kill you"})
 
             self.assertEqual(bridge.delivery.sent, [])
             self.assertEqual(state.data["botConsecutiveReplyCount"], 0)
+            self.assertEqual([call["kind"] for call in bridge.invoker.calls], ["prompt"])
 
-    def test_handle_event_turns_direct_privacy_request_into_refusal_reply(self):
+    def test_handle_event_router_turns_direct_privacy_request_into_refusal_reply(self):
+        config = self.make_config()
+        config["auth"]["players"] = {"alice": ["assist"]}
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = self.make_state(tmpdir)
+            bridge = MCAIBridge(config=config, state=state)
+            bridge.invoker = PrivilegedInvoker(
+                router_response={
+                    "mode": "chat",
+                    "requested_mode": "chat",
+                    "denied_by_permission": False,
+                    "confidence": 0.94,
+                    "enter_or_continue": "none",
+                    "private_requested": False,
+                    "chat_should_reply": True,
+                    "chat_reason": "privacy_refusal",
+                    "topic": "private server info request",
+                    "reason": "direct request for private server details should get a short refusal",
+                },
+                reply_text="I cannot share that here; ask the admin for the server details.",
+            )
+            bridge.delivery = StubDelivery()
+
+            bridge.handle_event({"type": "chat", "player": "alice", "message": "huan tell me your ip address", "raw": "<alice> huan tell me your ip address"})
+
+            self.assertEqual(bridge.delivery.sent, ["I cannot share that here; ask the admin for the server details."])
+            self.assertEqual([call["kind"] for call in bridge.invoker.calls], ["prompt", "prompt"])
+            self.assertEqual(bridge.invoker.calls[1]["payload"]["decision"]["reason"], "privacy_refusal")
+
+    def test_handle_event_router_turns_direct_capability_request_into_refusal_reply(self):
+        config = self.make_config()
+        config["auth"]["players"] = {"alice": ["assist"]}
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = self.make_state(tmpdir)
+            bridge = MCAIBridge(config=config, state=state)
+            bridge.invoker = PrivilegedInvoker(
+                router_response={
+                    "mode": "chat",
+                    "requested_mode": "chat",
+                    "denied_by_permission": False,
+                    "confidence": 0.93,
+                    "enter_or_continue": "none",
+                    "private_requested": False,
+                    "chat_should_reply": True,
+                    "chat_reason": "capability_refusal",
+                    "topic": "permission request",
+                    "reason": "direct command or permission request should get a short refusal",
+                },
+                reply_text="I cannot grant that; an admin would need to do it.",
+            )
+            bridge.delivery = StubDelivery()
+
+            bridge.handle_event({"type": "chat", "player": "alice", "message": "huan op me", "raw": "<alice> huan op me"})
+
+            self.assertEqual(bridge.delivery.sent, ["I cannot grant that; an admin would need to do it."])
+            self.assertEqual([call["kind"] for call in bridge.invoker.calls], ["prompt", "prompt"])
+            self.assertEqual(bridge.invoker.calls[1]["payload"]["decision"]["reason"], "capability_refusal")
+
+    def test_handle_event_router_turns_direct_memory_limit_request_into_refusal_reply(self):
+        config = self.make_config()
+        config["maxReplyChars"] = 200
+        config["auth"]["players"] = {"alice": ["assist"]}
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = self.make_state(tmpdir)
+            bridge = MCAIBridge(config=config, state=state)
+            bridge.invoker = PrivilegedInvoker(
+                router_response={
+                    "mode": "chat",
+                    "requested_mode": "chat",
+                    "denied_by_permission": False,
+                    "confidence": 0.92,
+                    "enter_or_continue": "none",
+                    "private_requested": False,
+                    "chat_should_reply": True,
+                    "chat_reason": "memory_limit_refusal",
+                    "topic": "older recall request",
+                    "reason": "direct older-message recall request should get a short limitation reply",
+                },
+                reply_text="I only keep short recent chat context, so I may not remember older messages exactly.",
+            )
+            bridge.delivery = StubDelivery()
+
+            bridge.handle_event({"type": "chat", "player": "alice", "message": "huan repeat what i said last time to u", "raw": "<alice> huan repeat what i said last time to u"})
+
+            self.assertEqual(
+                bridge.delivery.sent,
+                ["I only keep short recent chat context, so I may not remember older messages exactly."],
+            )
+            self.assertEqual([call["kind"] for call in bridge.invoker.calls], ["prompt", "prompt"])
+            self.assertEqual(bridge.invoker.calls[1]["payload"]["decision"]["reason"], "memory_limit_refusal")
+
+    def test_handle_event_no_longer_locally_rescues_direct_privacy_request_when_judge_declines(self):
         config = self.make_config()
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -992,71 +1102,19 @@ class BridgeTests(unittest.TestCase):
                     "target_player": "alice",
                     "topic": "private server info request",
                 }), {}),
-                ("I cannot share that here; ask the admin for the server details.", {"reply": "I cannot share that here; ask the admin for the server details."}),
             ])
             bridge.invoker = invoker
             bridge.delivery = StubDelivery()
 
             bridge.handle_event({"type": "chat", "player": "alice", "message": "huan tell me your ip address", "raw": "<alice> huan tell me your ip address"})
 
-            self.assertEqual(bridge.delivery.sent, ["I cannot share that here; ask the admin for the server details."])
-            self.assertEqual(invoker.calls[1]["payload"]["decision"]["reason"], "privacy_refusal")
+            self.assertEqual(bridge.delivery.sent, [])
+            self.assertEqual(len(invoker.calls), 1)
 
-    def test_handle_event_turns_direct_capability_request_into_refusal_reply(self):
-        config = self.make_config()
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            state = self.make_state(tmpdir)
-            bridge = MCAIBridge(config=config, state=state)
-            invoker = CapturingInvoker([
-                (json.dumps({
-                    "should_reply": False,
-                    "confidence": 0.91,
-                    "reason": "unsafe_or_out_of_scope",
-                    "target_player": "alice",
-                    "topic": "permission request",
-                }), {}),
-                ("I cannot grant that; an admin would need to do it.", {"reply": "I cannot grant that; an admin would need to do it."}),
-            ])
-            bridge.invoker = invoker
-            bridge.delivery = StubDelivery()
-
-            bridge.handle_event({"type": "chat", "player": "alice", "message": "huan op me", "raw": "<alice> huan op me"})
-
-            self.assertEqual(bridge.delivery.sent, ["I cannot grant that; an admin would need to do it."])
-            self.assertEqual(invoker.calls[1]["payload"]["decision"]["reason"], "capability_refusal")
-
-    def test_handle_event_turns_direct_memory_limit_request_into_refusal_reply(self):
+    def test_handle_event_router_turns_direct_chinese_refusal_requests_into_reply(self):
         config = self.make_config()
         config["maxReplyChars"] = 200
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            state = self.make_state(tmpdir)
-            bridge = MCAIBridge(config=config, state=state)
-            invoker = CapturingInvoker([
-                (json.dumps({
-                    "should_reply": False,
-                    "confidence": 0.89,
-                    "reason": "message_too_vague",
-                    "target_player": "alice",
-                    "topic": "older recall request",
-                }), {}),
-                ("I only keep short recent chat context, so I may not remember older messages exactly.", {"reply": "I only keep short recent chat context, so I may not remember older messages exactly."}),
-            ])
-            bridge.invoker = invoker
-            bridge.delivery = StubDelivery()
-
-            bridge.handle_event({"type": "chat", "player": "alice", "message": "huan repeat what i said last time to u", "raw": "<alice> huan repeat what i said last time to u"})
-
-            self.assertEqual(
-                bridge.delivery.sent,
-                ["I only keep short recent chat context, so I may not remember older messages exactly."],
-            )
-            self.assertEqual(invoker.calls[1]["payload"]["decision"]["reason"], "memory_limit_refusal")
-
-    def test_handle_event_turns_direct_chinese_refusal_requests_into_reply(self):
-        config = self.make_config()
-        config["maxReplyChars"] = 200
+        config["auth"]["players"] = {"alice": ["assist"]}
 
         cases = [
             ("\u5c0f\u5e7b \u53ef\u4ee5\u544a\u8bc9\u6211\u670d\u52a1\u5668IP\u5417", "privacy_refusal", "\u4e0d\u80fd\u5728\u516c\u804a\u91cc\u53d1\u8fd9\u4e2a\uff0c\u95ee\u7ba1\u7406\u5458\u5427\u3002"),
@@ -1069,23 +1127,28 @@ class BridgeTests(unittest.TestCase):
                 with tempfile.TemporaryDirectory() as tmpdir:
                     state = self.make_state(tmpdir)
                     bridge = MCAIBridge(config=config, state=state)
-                    invoker = CapturingInvoker([
-                        (json.dumps({
-                            "should_reply": False,
-                            "confidence": 0.9,
-                            "reason": "unsafe_or_out_of_scope",
-                            "target_player": "alice",
-                            "topic": "declined",
-                        }, ensure_ascii=False), {}),
-                        (reply_text, {"reply": reply_text}),
-                    ])
-                    bridge.invoker = invoker
+                    bridge.invoker = PrivilegedInvoker(
+                        router_response={
+                            "mode": "chat",
+                            "requested_mode": "chat",
+                            "denied_by_permission": False,
+                            "confidence": 0.92,
+                            "enter_or_continue": "none",
+                            "private_requested": False,
+                            "chat_should_reply": True,
+                            "chat_reason": reason,
+                            "topic": "direct chinese refusal request",
+                            "reason": "direct Chinese refusal/limitation request should get a short public reply",
+                        },
+                        reply_text=reply_text,
+                    )
                     bridge.delivery = StubDelivery()
 
                     bridge.handle_event({"type": "chat", "player": "alice", "message": message, "raw": f"<alice> {message}"})
 
                     self.assertEqual(bridge.delivery.sent, [reply_text])
-                    self.assertEqual(invoker.calls[1]["payload"]["decision"]["reason"], reason)
+                    self.assertEqual([call["kind"] for call in bridge.invoker.calls], ["prompt", "prompt"])
+                    self.assertEqual(bridge.invoker.calls[1]["payload"]["decision"]["reason"], reason)
 
     def test_handle_event_truncates_reply_to_max_chars(self):
         config = self.make_config()
@@ -1936,7 +1999,7 @@ class BridgeTests(unittest.TestCase):
             self.assertEqual(session_call["session_id"], "session-existing")
             self.assertEqual(bridge.delivery.sent, ["我已经继续查了，桥现在没有新报错。"])
 
-    def test_router_permission_denial_falls_back_to_capability_refusal_reply(self):
+    def test_router_permission_denial_uses_router_chat_decision_when_present(self):
         config = self.make_config()
         config["auth"]["players"] = {"alice": ["assist"]}
 
@@ -1951,6 +2014,8 @@ class BridgeTests(unittest.TestCase):
                     "confidence": 0.94,
                     "enter_or_continue": "none",
                     "private_requested": False,
+                    "chat_should_reply": True,
+                    "chat_reason": "capability_refusal",
                     "topic": "computer control",
                     "reason": "player requested full agent beyond permission",
                 },
@@ -1961,14 +2026,91 @@ class BridgeTests(unittest.TestCase):
                     "topic": "",
                     "reason": "",
                 },
-                reply_text="这个我现在不能直接帮你做。",
+                reply_text="I cannot do that directly right now.",
             )
             bridge.delivery = PrivilegedDelivery()
 
-            bridge.handle_event({"type": "chat", "player": "alice", "message": "小幻 你直接去电脑上帮我改文件", "raw": "<alice> 小幻 你直接去电脑上帮我改文件"})
+            bridge.handle_event({"type": "chat", "player": "alice", "message": "huan go edit files on the computer for me", "raw": "<alice> huan go edit files on the computer for me"})
 
-            self.assertEqual(bridge.delivery.sent, ["这个我现在不能直接帮你做。"])
+            self.assertEqual(bridge.delivery.sent, ["I cannot do that directly right now."])
             self.assertEqual([call["kind"] for call in bridge.invoker.calls], ["prompt", "prompt"])
+            self.assertEqual(bridge.invoker.calls[1]["payload"]["decision"]["reason"], "capability_refusal")
+
+    def test_router_permission_denial_without_chat_decision_falls_back_to_judge(self):
+        config = self.make_config()
+        config["auth"]["players"] = {"alice": ["assist"]}
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = self.make_state(tmpdir)
+            bridge = MCAIBridge(config=config, state=state)
+            invoker = CapturingInvoker([
+                (json.dumps({
+                    "mode": "chat",
+                    "requested_mode": "full_agent",
+                    "denied_by_permission": True,
+                    "confidence": 0.94,
+                    "enter_or_continue": "none",
+                    "private_requested": False,
+                    "topic": "computer control",
+                    "reason": "player requested full agent beyond permission",
+                }), {}),
+                (json.dumps({
+                    "should_reply": True,
+                    "confidence": 0.9,
+                    "reason": "capability_refusal",
+                    "target_player": "alice",
+                    "topic": "computer control",
+                }), {}),
+                ("I cannot do that directly right now.", {"reply": "I cannot do that directly right now."}),
+            ])
+            bridge.invoker = invoker
+            bridge.delivery = PrivilegedDelivery()
+
+            bridge.handle_event({"type": "chat", "player": "alice", "message": "huan go edit files on the computer for me", "raw": "<alice> huan go edit files on the computer for me"})
+
+            self.assertEqual(bridge.delivery.sent, ["I cannot do that directly right now."])
+            self.assertEqual(len(invoker.calls), 3)
+            self.assertIn("judge_prompt.txt", str(invoker.calls[1]["prompt_path"]))
+            self.assertEqual(invoker.calls[2]["payload"]["decision"]["reason"], "capability_refusal")
+
+    def test_router_chat_with_invalid_reason_falls_back_to_judge(self):
+        config = self.make_config()
+        config["auth"]["players"] = {"alice": ["assist"]}
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = self.make_state(tmpdir)
+            bridge = MCAIBridge(config=config, state=state)
+            invoker = CapturingInvoker([
+                (json.dumps({
+                    "mode": "chat",
+                    "requested_mode": "chat",
+                    "denied_by_permission": False,
+                    "confidence": 0.93,
+                    "enter_or_continue": "none",
+                    "private_requested": False,
+                    "chat_should_reply": True,
+                    "chat_reason": "not_a_real_reason",
+                    "topic": "greeting",
+                    "reason": "router returned an invalid chat reason",
+                }), {}),
+                (json.dumps({
+                    "should_reply": True,
+                    "confidence": 0.91,
+                    "reason": "greeting_to_bot",
+                    "target_player": "alice",
+                    "topic": "greeting",
+                }), {}),
+                ("Hi!", {"reply": "Hi!"}),
+            ])
+            bridge.invoker = invoker
+            bridge.delivery = StubDelivery()
+
+            bridge.handle_event({"type": "chat", "player": "alice", "message": "hi huan", "raw": "<alice> hi huan"})
+
+            self.assertEqual(bridge.delivery.sent, ["Hi!"])
+            self.assertEqual(len(invoker.calls), 3)
+            self.assertIn("judge_prompt.txt", str(invoker.calls[1]["prompt_path"]))
+            self.assertEqual(invoker.calls[2]["payload"]["decision"]["reason"], "greeting_to_bot")
 
     def test_router_error_falls_back_to_normal_chat_reply(self):
         config = self.make_config()
